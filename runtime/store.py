@@ -169,6 +169,11 @@ class RuntimeStore:
             rows = db.execute("SELECT * FROM events WHERE sequence>? ORDER BY sequence LIMIT ?", (after, limit)).fetchall()
         return [{**dict(row), "payload": json.loads(row["payload"])} for row in rows]
 
+    def list_run_events(self, run_id: str, limit: int = 250) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as db:
+            rows = db.execute("SELECT * FROM events WHERE run_id=? ORDER BY sequence LIMIT ?", (run_id, limit)).fetchall()
+        return [{**dict(row), "payload": json.loads(row["payload"])} for row in rows]
+
     def add_evidence(self, run: dict[str, Any], finding: str, quote: str, source_url: str | None = None) -> dict[str, Any]:
         item = {"id": f"evidence-{uuid4()}", "goal_id": run["goal_id"], "agent_id": run["agent_id"],
                 "run_id": run["id"], "finding": finding, "source_url": source_url or run["source_url"],
@@ -207,6 +212,12 @@ class RuntimeStore:
     def get_guard_case_for_event(self, event_id: str) -> dict[str, Any] | None:
         with self._lock, self._connect() as db:
             row = db.execute("SELECT * FROM guard_cases WHERE trigger_event_id=?", (event_id,)).fetchone()
+        return self.get_guard_case(row["id"]) if row else None
+
+    def get_active_guard_case_for_run(self, run_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as db:
+            row = db.execute("""SELECT id FROM guard_cases WHERE run_id=?
+              AND status NOT IN ('closed','inconclusive') ORDER BY created_at DESC LIMIT 1""", (run_id,)).fetchone()
         return self.get_guard_case(row["id"]) if row else None
 
     def append_guard_evidence(self, case_id: str, source_type: str, source_id: str,
@@ -293,7 +304,7 @@ class RuntimeStore:
             "interviewing": {"evaluating", "awaiting_evidence", "awaiting_human_review", "inconclusive"},
             "evaluating": {"awaiting_human_review", "containment_requested", "inconclusive", "closed"},
             "awaiting_evidence": {"investigating", "interviewing", "evaluating", "inconclusive", "closed"},
-            "awaiting_human_review": {"investigating", "containment_requested", "closed", "reopened"},
+            "awaiting_human_review": {"investigating", "interviewing", "containment_requested", "closed", "reopened"},
             "containment_requested": {"awaiting_human_review", "closed", "reopened"},
             "inconclusive": {"reopened", "closed"}, "closed": {"reopened"}, "reopened": {"investigating", "closed"},
         }

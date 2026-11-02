@@ -261,6 +261,12 @@ button,select,input,textarea { min-height:44px; }
 .guard-case-row b { font-size:15px; }
 .guard-case-row small,.guard-case-row p { margin:0; color:var(--muted); font-size:12px; line-height:1.5; }
 .guard-case-severity { justify-self:start; padding:4px 7px; border-radius:999px; background:var(--accent-dim); color:var(--accent); font-size:10px; font-weight:700; letter-spacing:.08em; }
+.guard-investigation-action { display:grid; gap:8px; margin:14px 0 22px; }
+.guard-investigation-action small { color:var(--muted); font-size:12px; line-height:1.5; }
+.evidence-list article { padding:14px 0; border-bottom:1px solid var(--line); }
+.evidence-list article > b { display:block; margin-bottom:8px; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em; }
+.evidence-list article p { margin:8px 0; line-height:1.55; }
+.evidence-list article small { display:block; margin-top:6px; color:var(--muted); font-size:11px; overflow-wrap:anywhere; }
 .provider-panel-intro { padding:18px 0 8px; }
 .provider-panel-intro p { margin:0 0 7px; font-size:14px; line-height:1.5; }
 .provider-panel-intro small { color:var(--muted); font-size:12px; line-height:1.5; }

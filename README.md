@@ -73,6 +73,10 @@ Run `npm run test:browser` to exercise the scheduler and event/evidence store ag
 | Research browser | Isolated Playwright/Chromium context, public web search, search-result origin authorization, typed browser tools; actual Chromium launch not proven by the fake-browser tests |
 | AIP | Deterministic Python authorization for supported tools; experimental, not a production security protocol |
 | Events and evidence | Runtime-generated records persist locally; Guard cases correlate AIP denials with append-only, hash-chained evidence and case-level read permissions |
+| Guard Observer | Deterministic AIP denial rules open and group cases per run; one contextual Muse Spark screen is triggered per case, with qualitative uncalibrated risk and evidence-cited output |
+| Guard investigation | User-started Muse Wonder report plus adaptive, one-question-at-a-time interviews; Wonder chooses evidence-cited questions, the original agent model answers in an isolated no-tools context, each statement is retained as unverified evidence, and the five-question cap persists with the case; live model calls remain unverified |
+| Guard Adjudicator | Independent Muse Wonder review excludes the Detective report, validates citations, distinguishes denials from completed actions, and records contradictions and uncertainty for human review; it cannot change AIP policy; live model calls remain unverified |
+| Guard containment | A human-confirmed pause/resume is routed through the trusted runtime, recorded in the hash-chained case history, and leaves AIP policy unchanged; deny-pending, revocation, browser isolation, and automatic emergency rules remain unimplemented |
 | Provider connections | Cloud credentials are saved in macOS Keychain; provider settings and local model endpoints stay on-device; ChatGPT account tokens are refreshed and used only when plan usage was authorized |
 | Voice transcription | Still a labeled selectable demonstration; no speech-to-text model is connected |
 | UB schedule PDF | Existing guided product demonstration; it is not produced by the research runtime |

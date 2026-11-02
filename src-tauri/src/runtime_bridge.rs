@@ -773,3 +773,108 @@ pub fn runtime_control(
         json!({"action":action,"call_id":call_id}),
     )
 }
+
+#[tauri::command]
+pub fn runtime_guard_investigate(
+    window: WebviewWindow,
+    state: State<'_, RuntimeBridge>,
+    case_id: String,
+) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    let (base_url, token) = {
+        let slot = state.runtime.lock().map_err(|_| "Runtime state is unavailable.".to_string())?;
+        let runtime = slot.as_ref().ok_or_else(|| "Runtime is not running.".to_string())?;
+        (runtime.base_url.clone(), runtime.token.clone())
+    };
+    let client = Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(150))
+        .build()
+        .map_err(|_| "Could not initialize the Guard connection.".to_string())?;
+    authenticated_post(
+        &client,
+        &base_url,
+        &token,
+        &format!("/guard/cases/{case_id}/investigate"),
+        json!({}),
+    )
+}
+
+#[tauri::command]
+pub fn runtime_guard_interview(
+    window: WebviewWindow,
+    state: State<'_, RuntimeBridge>,
+    case_id: String,
+) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    let (base_url, token) = {
+        let slot = state.runtime.lock().map_err(|_| "Runtime state is unavailable.".to_string())?;
+        let runtime = slot.as_ref().ok_or_else(|| "Runtime is not running.".to_string())?;
+        (runtime.base_url.clone(), runtime.token.clone())
+    };
+    let client = Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(190))
+        .build()
+        .map_err(|_| "Could not initialize the Guard connection.".to_string())?;
+    authenticated_post(
+        &client,
+        &base_url,
+        &token,
+        &format!("/guard/cases/{case_id}/interview"),
+        json!({}),
+    )
+}
+
+#[tauri::command]
+pub fn runtime_guard_adjudicate(
+    window: WebviewWindow,
+    state: State<'_, RuntimeBridge>,
+    case_id: String,
+) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    let (base_url, token) = {
+        let slot = state.runtime.lock().map_err(|_| "Runtime state is unavailable.".to_string())?;
+        let runtime = slot.as_ref().ok_or_else(|| "Runtime is not running.".to_string())?;
+        (runtime.base_url.clone(), runtime.token.clone())
+    };
+    let client = Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(150))
+        .build()
+        .map_err(|_| "Could not initialize the Guard connection.".to_string())?;
+    authenticated_post(
+        &client,
+        &base_url,
+        &token,
+        &format!("/guard/cases/{case_id}/adjudicate"),
+        json!({}),
+    )
+}
+
+#[tauri::command]
+pub fn runtime_guard_containment(
+    window: WebviewWindow,
+    state: State<'_, RuntimeBridge>,
+    case_id: String,
+    action: String,
+    reason: String,
+) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    let (base_url, token) = {
+        let slot = state.runtime.lock().map_err(|_| "Runtime state is unavailable.".to_string())?;
+        let runtime = slot.as_ref().ok_or_else(|| "Runtime is not running.".to_string())?;
+        (runtime.base_url.clone(), runtime.token.clone())
+    };
+    let client = authorized_client()?;
+    authenticated_post(
+        &client,
+        &base_url,
+        &token,
+        &format!("/guard/cases/{case_id}/containment"),
+        json!({"action":action,"reason":reason}),
+    )
+}

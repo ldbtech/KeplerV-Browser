@@ -18,6 +18,11 @@ from runtime.browser.tools import (
 from runtime.models import RunRequest
 from runtime.providers import ModelProviderError, ProviderRegistry
 from runtime.guard.observer import GuardObserver
+from runtime.guard.detective import GuardDetective
+from runtime.guard.interrogation import GuardInterrogator
+from runtime.guard.adjudicator import GuardAdjudicator
+from runtime.guard.containment import GuardContainment
+from runtime.guard.screening import GuardScreener
 from runtime.store import RuntimeStore
 from runtime.search import search_public_web
 
@@ -85,6 +90,12 @@ class RuntimeService:
         self.store = store or RuntimeStore()
         self.guard_observer = GuardObserver(self.store)
         self.providers = providers or ProviderRegistry()
+        self.guard_detective = GuardDetective(self.store, self.providers)
+        self.guard_interrogator = GuardInterrogator(self.store, self.providers)
+        self.guard_adjudicator = GuardAdjudicator(self.store, self.providers)
+        self.guard_containment = GuardContainment(self.store, self, self.guard_observer.cases)
+        self.guard_screener = GuardScreener(self.store, self.providers, self.guard_observer.cases)
+        self._guard_screening_tasks: dict[str, asyncio.Task] = {}
         self.browser_factory = browser_factory
         self.public_host_check = public_host_check
         self.search_func = search_func
@@ -195,9 +206,32 @@ class RuntimeService:
         if run:
             event = self.store.add_event(run, kind, status, payload, tool)
             if kind == "aip.decision":
-                self.guard_observer.observe(event)
+                case = self.guard_observer.observe(event)
+                if case:
+                    self._schedule_guard_screening(case)
             return event
         return None
+
+    def _schedule_guard_screening(self, case: dict[str, Any]) -> None:
+        case_id = case["id"]
+        if case_id in self._guard_screening_tasks:
+            return
+        if any(item["source_type"] in {"guard_screening", "guard_screening_error"} for item in case["evidence"]):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._run_guard_screening(case_id))
+        self._guard_screening_tasks[case_id] = task
+        task.add_done_callback(lambda _: self._guard_screening_tasks.pop(case_id, None))
+
+    async def _run_guard_screening(self, case_id: str) -> None:
+        try:
+            await self.guard_screener.screen(case_id)
+        except Exception:
+            # The screener's error evidence is the user-visible failure record.
+            return
 
     async def _execute(self, run_id: str) -> None:
         run = self.store.get_run(run_id)

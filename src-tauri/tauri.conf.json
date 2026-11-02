@@ -58,7 +58,14 @@
       "../runtime/guard/__init__.py": "runtime/guard/__init__.py",
       "../runtime/guard/schemas.py": "runtime/guard/schemas.py",
       "../runtime/guard/case_manager.py": "runtime/guard/case_manager.py",
-      "../runtime/guard/observer.py": "runtime/guard/observer.py"
+      "../runtime/guard/observer.py": "runtime/guard/observer.py",
+      "../runtime/guard/evidence.py": "runtime/guard/evidence.py",
+      "../runtime/guard/detective.py": "runtime/guard/detective.py",
+      "../runtime/guard/interrogation.py": "runtime/guard/interrogation.py",
+      "../runtime/guard/adjudicator.py": "runtime/guard/adjudicator.py",
+      "../runtime/guard/containment.py": "runtime/guard/containment.py",
+      "../runtime/guard/risk.py": "runtime/guard/risk.py",
+      "../runtime/guard/screening.py": "runtime/guard/screening.py"
     },
     "icon": [
       "icons/32x32.png",

@@ -11,6 +11,15 @@ class GuardCaseManager:
         self.store = store
 
     def open_case(self, run: dict[str, Any], event: dict[str, Any], *, severity: str, signal: str, summary: str) -> dict[str, Any]:
+        for existing in (self.store.get_guard_case_for_event(event["id"]), self.store.get_active_guard_case_for_run(run["id"])):
+            if existing:
+                if existing["trigger_event_id"] == event["id"]:
+                    return existing
+                self.store.append_guard_evidence(
+                    existing["id"], "runtime_event", event["id"], event["timestamp"],
+                    {"type": event["type"], "status": event["status"], "tool": event.get("tool"), "payload": event.get("payload", {})},
+                )
+                return self.store.get_guard_case(existing["id"])
         case_id = f"guard-{uuid4()}"
         case = self.store.create_guard_case({
             "id": case_id, "trigger_event_id": event["id"], "run_id": run["id"],

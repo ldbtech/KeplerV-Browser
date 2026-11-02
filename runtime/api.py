@@ -7,7 +7,10 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 
 from runtime.models import ControlRequest, RunRequest
-from runtime.guard.schemas import GuardTransitionRequest
+from runtime.guard.schemas import GuardContainmentRequest, GuardTransitionRequest
+from runtime.guard.evidence import GuardEvidenceService
+from runtime.guard.detective import GuardInvestigationError
+from runtime.guard.interrogation import GuardInterviewError
 from runtime.scheduler import RuntimeService
 
 
@@ -66,6 +69,18 @@ def create_app(service: RuntimeService | None = None) -> FastAPI:
         valid = request.app.state.runtime_service.guard_observer.cases.verify_integrity(case_id)
         return {"case_id": case_id, "valid": valid}
 
+    @app.get("/guard/cases/{case_id}/evidence")
+    async def reconstruct_guard_case(case_id: str, request: Request, _: None = Depends(authenticated)):
+        service = request.app.state.runtime_service
+        if not service.guard_observer.cases.can_read(case_id):
+            raise HTTPException(status_code=403, detail="Guard case read permission required.")
+        try:
+            return GuardEvidenceService(service.store, service.guard_observer.cases).reconstruct_case(case_id, "local_user")
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @app.post("/guard/cases/{case_id}/transition")
     async def transition_guard_case(case_id: str, body: GuardTransitionRequest, request: Request, _: None = Depends(authenticated)):
         cases = request.app.state.runtime_service.guard_observer.cases
@@ -78,6 +93,72 @@ def create_app(service: RuntimeService | None = None) -> FastAPI:
         if not case:
             raise HTTPException(status_code=404, detail="Guard case not found.")
         return case
+
+    @app.post("/guard/cases/{case_id}/investigate")
+    async def investigate_guard_case(case_id: str, request: Request, _: None = Depends(authenticated)):
+        service = request.app.state.runtime_service
+        if not service.guard_observer.cases.can_read(case_id):
+            raise HTTPException(status_code=403, detail="Guard case access required.")
+        try:
+            return await service.guard_detective.investigate(case_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except GuardInvestigationError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/guard/cases/{case_id}/interview")
+    async def interview_guard_agent(case_id: str, request: Request, _: None = Depends(authenticated)):
+        service = request.app.state.runtime_service
+        if not service.guard_observer.cases.can_read(case_id):
+            raise HTTPException(status_code=403, detail="Guard case access required.")
+        try:
+            return await service.guard_interrogator.ask_next(case_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except GuardInterviewError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/guard/cases/{case_id}/adjudicate")
+    async def adjudicate_guard_case(case_id: str, request: Request, _: None = Depends(authenticated)):
+        service = request.app.state.runtime_service
+        if not service.guard_observer.cases.can_read(case_id):
+            raise HTTPException(status_code=403, detail="Guard case access required.")
+        try:
+            return await service.guard_adjudicator.adjudicate(case_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except GuardInvestigationError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/guard/cases/{case_id}/containment")
+    async def contain_guard_agent(case_id: str, body: GuardContainmentRequest, request: Request, _: None = Depends(authenticated)):
+        service = request.app.state.runtime_service
+        if not service.guard_observer.cases.can_read(case_id):
+            raise HTTPException(status_code=403, detail="Guard case access required.")
+        try:
+            return await service.guard_containment.apply(case_id, body.action, body.reason, "local_user")
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/runs/{run_id}")
     async def get_run(run_id: str, request: Request, _: None = Depends(authenticated)):
