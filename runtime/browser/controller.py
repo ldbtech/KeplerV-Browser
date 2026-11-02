@@ -14,11 +14,11 @@ class BrowserToolError(RuntimeError):
 
 
 class BrowserController:
-    """One isolated Chromium context, scoped to one exact user-approved origin."""
+    """One isolated Chromium context, scoped to user-provided and search-approved origins."""
 
-    def __init__(self, run_id: str, authorized_origin: tuple[str, str, int], data_dir: Path):
+    def __init__(self, run_id: str, authorized_origin: tuple[str, str, int] | None, data_dir: Path):
         self.run_id = run_id
-        self.authorized_origin = authorized_origin
+        self.authorized_origins = {authorized_origin} if authorized_origin else set()
         self.data_dir = data_dir
         self._playwright = None
         self._browser: Any = None
@@ -61,7 +61,10 @@ class BrowserController:
             port = parsed.port or (443 if parsed.scheme == "https" else 80)
         except ValueError:
             return False
-        return (parsed.scheme, (parsed.hostname or "").lower().rstrip("."), port) == self.authorized_origin
+        return (parsed.scheme, (parsed.hostname or "").lower().rstrip("."), port) in self.authorized_origins
+
+    def authorize_origin(self, origin: tuple[str, str, int]) -> None:
+        self.authorized_origins.add(origin)
 
     async def navigate(self, args: dict) -> dict:
         parsed = NavigateArgs.model_validate(args)
@@ -83,7 +86,7 @@ class BrowserController:
         assert self.page
         title = await self.page.title()
         text = await self.page.locator("body").inner_text(timeout=5_000)
-        return {"title": title[:500], "url": self.page.url, "visible_text": text[:12_000], "content_is_untrusted": True}
+        return {"title": title[:500], "url": self.page.url, "visible_text": text[:2_000], "content_is_untrusted": True}
 
     async def extract_text(self, args: dict) -> dict:
         parsed = ExtractArgs.model_validate(args)

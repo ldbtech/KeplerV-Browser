@@ -30,13 +30,13 @@ The current `.app` bundle includes the Python runtime source, but does not bundl
 ## Research flow
 
 1. Create/select a goal in the existing Intent Space and open its details.
-2. Provide a public HTTPS article URL. The user-provided URL establishes the exact host and port the agent may access.
-3. Start Muse research. The runtime persists an agent/run record and begins an asynchronous model/tool loop.
-4. Muse can navigate, inspect, extract text, and take a screenshot in an isolated headless Chromium context. Page clicks and form fills require per-action approval.
+2. Set the maximum token budget for the run (1,000–50,000) or leave the saved preference.
+3. Start Muse research from the goal. A starting URL is optional; KeplerV searches the public web for up to three results.
+4. Muse may inspect up to two public HTTPS result pages and extract up to 3,500 characters per page in an isolated headless Chromium context. Page clicks and form fills require per-action approval.
 5. KeplerV records runtime events and source-quoted findings in local SQLite, associates them with the goal, and updates the existing graph/activity surfaces.
 6. Pause, resume, stop, review approvals, and inspect findings from the goal/agent panels.
 
-The model cannot grant itself permissions. AIP checks agent/run identity, goal, capability, tool, authorized origin, public DNS resolution, delegation limits, and approval before a tool runs. The browser permits requests only to the selected origin; untrusted pages do not have Tauri IPC access. Delegated agents inherit the goal and source origin with reduced permissions, bounded child count, depth, step, and token budgets.
+The model cannot grant itself permissions. AIP checks agent/run identity, goal, capability, tool, authorized origin, public DNS resolution, delegation limits, and approval before a tool runs. The browser permits requests only to the selected origin; untrusted pages do not have Tauri IPC access. Near 60% of a sufficiently large token budget, a parent can hand off compact source excerpts to one continuation agent. The child receives only the remaining run budget, and handoffs pass through AIP and the normal delegation limits.
 
 ## Runtime settings
 
@@ -70,15 +70,15 @@ Run `npm run test:browser` to exercise the scheduler and event/evidence store ag
 | Desktop shell and Intent Space | Native Tauri 2 + Svelte application; existing goal graph and panels are reused |
 | Local UAR | Real FastAPI sidecar, token-authenticated loopback API, asynchronous agent lifecycle, pause/resume/stop, SQLite persistence |
 | Muse | Real Meta API adapter using `MODEL_API_KEY`, configurable model name, tool-call normalization, timeouts and visible errors; live request not tested without credentials |
-| Research browser | Isolated Playwright/Chromium context, exact-origin request filtering, typed browser tools; actual Chromium launch not proven by the fake-browser tests |
+| Research browser | Isolated Playwright/Chromium context, public web search, search-result origin authorization, typed browser tools; actual Chromium launch not proven by the fake-browser tests |
 | AIP | Deterministic Python authorization for supported tools; experimental, not a production security protocol |
-| Events and evidence | Runtime-generated structured records persisted locally and reflected in the current UI |
+| Events and evidence | Runtime-generated records persist locally; Guard cases correlate AIP denials with append-only, hash-chained evidence and case-level read permissions |
 | Provider connections | Cloud credentials are saved in macOS Keychain; provider settings and local model endpoints stay on-device; ChatGPT account tokens are refreshed and used only when plan usage was authorized |
 | Voice transcription | Still a labeled selectable demonstration; no speech-to-text model is connected |
 | UB schedule PDF | Existing guided product demonstration; it is not produced by the research runtime |
-| Legacy sample goals/agents and guard scenario | Existing local demonstration data and simulation paths remain |
+| Legacy sample goals and agents | Existing workspace examples remain local; Guard cases now come from actual runtime AIP decisions |
 
-The native resource-window feature remains separate from the agent research browser. A research agent uses its isolated Playwright context and does not open conventional tabs in the user's visible window.
+The native resource-window feature remains separate from the agent research browser. A research agent uses its isolated Playwright context and does not open conventional tabs in the user's visible window. Web search uses DuckDuckGo's public HTML search endpoint; no separate search account or API key is required.
 
 ## Project structure
 

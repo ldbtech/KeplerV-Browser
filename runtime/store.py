@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import sqlite3
 from pathlib import Path
@@ -23,6 +24,7 @@ class RuntimeStore:
     def _connect(self):
         connection = sqlite3.connect(self.db_path, timeout=5)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
         return connection
 
     def _initialize(self) -> None:
@@ -52,6 +54,39 @@ class RuntimeStore:
                   run_id TEXT NOT NULL, finding TEXT NOT NULL, source_url TEXT NOT NULL,
                   quote TEXT NOT NULL, created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS guard_cases (
+                  id TEXT PRIMARY KEY, trigger_event_id TEXT UNIQUE NOT NULL,
+                  run_id TEXT NOT NULL, goal_id TEXT NOT NULL, goal_title TEXT NOT NULL,
+                  agent_id TEXT NOT NULL, parent_agent_id TEXT, provider TEXT NOT NULL,
+                  model TEXT NOT NULL, status TEXT NOT NULL, severity TEXT NOT NULL,
+                  signal TEXT NOT NULL, summary TEXT NOT NULL,
+                  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS guard_cases_goal_created ON guard_cases(goal_id, created_at DESC);
+                CREATE TABLE IF NOT EXISTS guard_evidence (
+                  id TEXT PRIMARY KEY, case_id TEXT NOT NULL REFERENCES guard_cases(id),
+                  sequence INTEGER NOT NULL, source_type TEXT NOT NULL, source_id TEXT NOT NULL,
+                  timestamp TEXT NOT NULL, payload TEXT NOT NULL, previous_hash TEXT NOT NULL,
+                  integrity_hash TEXT NOT NULL, UNIQUE(case_id, sequence), UNIQUE(case_id, source_type, source_id)
+                );
+                CREATE TABLE IF NOT EXISTS guard_transitions (
+                  id TEXT PRIMARY KEY, case_id TEXT NOT NULL REFERENCES guard_cases(id),
+                  from_status TEXT NOT NULL, to_status TEXT NOT NULL, reason TEXT NOT NULL,
+                  actor TEXT NOT NULL, timestamp TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS guard_case_permissions (
+                  case_id TEXT NOT NULL REFERENCES guard_cases(id), principal TEXT NOT NULL,
+                  permission TEXT NOT NULL, granted_at TEXT NOT NULL,
+                  PRIMARY KEY(case_id, principal, permission)
+                );
+                CREATE TRIGGER IF NOT EXISTS guard_evidence_no_update
+                  BEFORE UPDATE ON guard_evidence BEGIN SELECT RAISE(ABORT, 'Guard evidence is append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS guard_evidence_no_delete
+                  BEFORE DELETE ON guard_evidence BEGIN SELECT RAISE(ABORT, 'Guard evidence is append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS guard_transitions_no_update
+                  BEFORE UPDATE ON guard_transitions BEGIN SELECT RAISE(ABORT, 'Guard transitions are append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS guard_transitions_no_delete
+                  BEFORE DELETE ON guard_transitions BEGIN SELECT RAISE(ABORT, 'Guard transitions are append-only'); END;
             """)
             columns = {row[1] for row in db.execute("PRAGMA table_info(runs)")}
             if "conversation" not in columns:
@@ -70,6 +105,7 @@ class RuntimeStore:
     def create_run(self, values: dict[str, Any], provider: str, model: str, tools: list[str], permissions: list[str], parent_agent_id: str | None = None) -> dict[str, Any]:
         run_id, agent_id = f"run-{uuid4()}", f"agent-{uuid4()}"
         now = utc_now()
+        values = {**values, "source_url": values.get("source_url") or ""}
         row = {"id": run_id, "agent_id": agent_id, "parent_agent_id": parent_agent_id, **values, "provider": provider, "model": model,
                "status": "created", "permissions": permissions, "tools": tools,
                "steps": 0, "tokens_used": 0, "browser_visited": False, "text_extracted": False,
@@ -149,3 +185,144 @@ class RuntimeStore:
         query += " ORDER BY created_at DESC"
         with self._lock, self._connect() as db:
             return [dict(row) for row in db.execute(query, args).fetchall()]
+
+    @staticmethod
+    def _guard_case_dict(row: sqlite3.Row) -> dict[str, Any]:
+        return dict(row)
+
+    def create_guard_case(self, values: dict[str, Any]) -> dict[str, Any] | None:
+        now = utc_now()
+        with self._lock, self._connect() as db:
+            cursor = db.execute("""INSERT OR IGNORE INTO guard_cases
+              (id,trigger_event_id,run_id,goal_id,goal_title,agent_id,parent_agent_id,provider,model,status,severity,signal,summary,created_at,updated_at)
+              VALUES (:id,:trigger_event_id,:run_id,:goal_id,:goal_title,:agent_id,:parent_agent_id,:provider,:model,:status,:severity,:signal,:summary,:created_at,:updated_at)""",
+              {**values, "created_at": now, "updated_at": now})
+            if cursor.rowcount == 0:
+                return None
+            db.executemany("INSERT OR IGNORE INTO guard_case_permissions (case_id,principal,permission,granted_at) VALUES (?,?,?,?)",
+                           [(values["id"], "local_user", "read", now), (values["id"], "guard_detective", "read", now)])
+            row = db.execute("SELECT * FROM guard_cases WHERE id=?", (values["id"],)).fetchone()
+        return self._guard_case_dict(row)
+
+    def get_guard_case_for_event(self, event_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as db:
+            row = db.execute("SELECT * FROM guard_cases WHERE trigger_event_id=?", (event_id,)).fetchone()
+        return self.get_guard_case(row["id"]) if row else None
+
+    def append_guard_evidence(self, case_id: str, source_type: str, source_id: str,
+                              timestamp: str, payload: dict[str, Any]) -> dict[str, Any]:
+        payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        with self._lock, self._connect() as db:
+            existing = db.execute("SELECT * FROM guard_evidence WHERE case_id=? AND source_type=? AND source_id=?",
+                                  (case_id, source_type, source_id)).fetchone()
+            if existing:
+                return self._guard_evidence_dict(existing)
+            previous = db.execute("SELECT sequence,integrity_hash FROM guard_evidence WHERE case_id=? ORDER BY sequence DESC LIMIT 1", (case_id,)).fetchone()
+            sequence = (previous["sequence"] + 1) if previous else 1
+            previous_hash = previous["integrity_hash"] if previous else "0" * 64
+            evidence_id = f"guard-evidence-{uuid4()}"
+            canonical = json.dumps({"id": evidence_id, "case_id": case_id, "sequence": sequence,
+                "source_type": source_type, "source_id": source_id, "timestamp": timestamp,
+                "payload": json.loads(payload_json), "previous_hash": previous_hash},
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            integrity_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+            db.execute("""INSERT INTO guard_evidence
+              (id,case_id,sequence,source_type,source_id,timestamp,payload,previous_hash,integrity_hash)
+              VALUES (?,?,?,?,?,?,?,?,?)""",
+              (evidence_id, case_id, sequence, source_type, source_id, timestamp, payload_json, previous_hash, integrity_hash))
+            row = db.execute("SELECT * FROM guard_evidence WHERE id=?", (evidence_id,)).fetchone()
+        return self._guard_evidence_dict(row)
+
+    @staticmethod
+    def _guard_evidence_dict(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item.pop("sequence", None)
+        item["payload"] = json.loads(item["payload"])
+        return item
+
+    def list_guard_cases(self, goal_id: str | None = None) -> list[dict[str, Any]]:
+        query, args = "SELECT * FROM guard_cases", ()
+        if goal_id:
+            query += " WHERE goal_id=?"
+            args = (goal_id,)
+        query += " ORDER BY created_at DESC"
+        with self._lock, self._connect() as db:
+            rows = db.execute(query, args).fetchall()
+        return [self._guard_case_dict(row) for row in rows]
+
+    def list_permitted_guard_cases(self, principal: str, permission: str = "read") -> list[dict[str, Any]]:
+        with self._lock, self._connect() as db:
+            rows = db.execute("""SELECT c.* FROM guard_cases c
+              JOIN guard_case_permissions p ON p.case_id=c.id
+              WHERE p.principal=? AND p.permission=? ORDER BY c.created_at DESC""",
+              (principal, permission)).fetchall()
+        return [self._guard_case_dict(row) for row in rows]
+
+    def has_guard_case_permission(self, case_id: str, principal: str, permission: str = "read") -> bool:
+        with self._lock, self._connect() as db:
+            return db.execute("SELECT 1 FROM guard_case_permissions WHERE case_id=? AND principal=? AND permission=?",
+                              (case_id, principal, permission)).fetchone() is not None
+
+    def grant_guard_case_permission(self, case_id: str, principal: str, permission: str = "read") -> None:
+        with self._lock, self._connect() as db:
+            db.execute("INSERT OR IGNORE INTO guard_case_permissions (case_id,principal,permission,granted_at) VALUES (?,?,?,?)",
+                       (case_id, principal, permission, utc_now()))
+
+    def revoke_guard_case_permission(self, case_id: str, principal: str, permission: str = "read") -> None:
+        with self._lock, self._connect() as db:
+            db.execute("DELETE FROM guard_case_permissions WHERE case_id=? AND principal=? AND permission=?",
+                       (case_id, principal, permission))
+
+    def get_guard_case(self, case_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as db:
+            row = db.execute("SELECT * FROM guard_cases WHERE id=?", (case_id,)).fetchone()
+            if not row:
+                return None
+            case = self._guard_case_dict(row)
+            evidence = db.execute("SELECT * FROM guard_evidence WHERE case_id=? ORDER BY sequence", (case_id,)).fetchall()
+            transitions = db.execute("SELECT * FROM guard_transitions WHERE case_id=? ORDER BY timestamp,id", (case_id,)).fetchall()
+        case["evidence"] = [self._guard_evidence_dict(item) for item in evidence]
+        case["transitions"] = [dict(item) for item in transitions]
+        return case
+
+    def transition_guard_case(self, case_id: str, status: str, reason: str, actor: str = "guard") -> dict[str, Any] | None:
+        allowed = {
+            "detected": {"triaged", "investigating", "inconclusive", "closed"},
+            "triaged": {"investigating", "awaiting_human_review", "inconclusive", "closed"},
+            "investigating": {"interviewing", "evaluating", "awaiting_evidence", "awaiting_human_review", "inconclusive", "closed"},
+            "interviewing": {"evaluating", "awaiting_evidence", "awaiting_human_review", "inconclusive"},
+            "evaluating": {"awaiting_human_review", "containment_requested", "inconclusive", "closed"},
+            "awaiting_evidence": {"investigating", "interviewing", "evaluating", "inconclusive", "closed"},
+            "awaiting_human_review": {"investigating", "containment_requested", "closed", "reopened"},
+            "containment_requested": {"awaiting_human_review", "closed", "reopened"},
+            "inconclusive": {"reopened", "closed"}, "closed": {"reopened"}, "reopened": {"investigating", "closed"},
+        }
+        with self._lock, self._connect() as db:
+            row = db.execute("SELECT status FROM guard_cases WHERE id=?", (case_id,)).fetchone()
+            if not row:
+                return None
+            previous = row["status"]
+            if status not in allowed.get(previous, set()):
+                raise ValueError(f"Invalid Guard case transition: {previous} → {status}.")
+            now = utc_now()
+            db.execute("UPDATE guard_cases SET status=?,updated_at=? WHERE id=?", (status, now, case_id))
+            db.execute("INSERT INTO guard_transitions (id,case_id,from_status,to_status,reason,actor,timestamp) VALUES (?,?,?,?,?,?,?)",
+                       (f"guard-transition-{uuid4()}", case_id, previous, status, reason, actor, now))
+        return self.get_guard_case(case_id)
+
+    def verify_guard_case_integrity(self, case_id: str) -> bool:
+        with self._lock, self._connect() as db:
+            rows = db.execute("SELECT * FROM guard_evidence WHERE case_id=? ORDER BY sequence", (case_id,)).fetchall()
+        previous_hash = "0" * 64
+        for expected_sequence, row in enumerate(rows, start=1):
+            if row["sequence"] != expected_sequence or row["previous_hash"] != previous_hash:
+                return False
+            canonical = json.dumps({"id": row["id"], "case_id": row["case_id"], "sequence": row["sequence"],
+                "source_type": row["source_type"], "source_id": row["source_id"], "timestamp": row["timestamp"],
+                "payload": json.loads(row["payload"]), "previous_hash": row["previous_hash"]},
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            actual = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+            if actual != row["integrity_hash"]:
+                return False
+            previous_hash = actual
+        return bool(rows) and self.get_guard_case(case_id) is not None

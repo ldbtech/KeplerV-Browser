@@ -7,6 +7,7 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 
 from runtime.models import ControlRequest, RunRequest
+from runtime.guard.schemas import GuardTransitionRequest
 from runtime.scheduler import RuntimeService
 
 
@@ -39,6 +40,44 @@ def create_app(service: RuntimeService | None = None) -> FastAPI:
     @app.get("/snapshot")
     async def snapshot(request: Request, after: int = Query(default=0, ge=0), _: None = Depends(authenticated)):
         return request.app.state.runtime_service.snapshot(after)
+
+    @app.get("/guard/cases")
+    async def list_guard_cases(request: Request, goal_id: str | None = None, _: None = Depends(authenticated)):
+        return request.app.state.runtime_service.guard_observer.cases.list_cases(goal_id)
+
+    @app.get("/guard/cases/{case_id}")
+    async def get_guard_case(case_id: str, request: Request, _: None = Depends(authenticated)):
+        cases = request.app.state.runtime_service.guard_observer.cases
+        if not cases.can_read(case_id):
+            raise HTTPException(status_code=403, detail="Guard case read permission required.")
+        case = cases.get_case(case_id)
+        if not case:
+            raise HTTPException(status_code=404, detail="Guard case not found.")
+        return case
+
+    @app.get("/guard/cases/{case_id}/integrity")
+    async def verify_guard_case(case_id: str, request: Request, _: None = Depends(authenticated)):
+        cases = request.app.state.runtime_service.guard_observer.cases
+        if not cases.can_read(case_id):
+            raise HTTPException(status_code=403, detail="Guard case read permission required.")
+        case = cases.get_case(case_id)
+        if not case:
+            raise HTTPException(status_code=404, detail="Guard case not found.")
+        valid = request.app.state.runtime_service.guard_observer.cases.verify_integrity(case_id)
+        return {"case_id": case_id, "valid": valid}
+
+    @app.post("/guard/cases/{case_id}/transition")
+    async def transition_guard_case(case_id: str, body: GuardTransitionRequest, request: Request, _: None = Depends(authenticated)):
+        cases = request.app.state.runtime_service.guard_observer.cases
+        if not cases.can_read(case_id):
+            raise HTTPException(status_code=403, detail="Guard case access required.")
+        try:
+            case = cases.transition(case_id, body.status, body.reason, "local_user")
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not case:
+            raise HTTPException(status_code=404, detail="Guard case not found.")
+        return case
 
     @app.get("/runs/{run_id}")
     async def get_run(run_id: str, request: Request, _: None = Depends(authenticated)):

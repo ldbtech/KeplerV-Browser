@@ -39,6 +39,7 @@
       "../runtime/api.py": "runtime/api.py",
       "../runtime/models.py": "runtime/models.py",
       "../runtime/scheduler.py": "runtime/scheduler.py",
+      "../runtime/search.py": "runtime/search.py",
       "../runtime/store.py": "runtime/store.py",
       "../runtime/requirements.txt": "runtime/requirements.txt",
       "../runtime/aip/__init__.py": "runtime/aip/__init__.py",
@@ -53,7 +54,11 @@
       "../runtime/providers/openai_compatible.py": "runtime/providers/openai_compatible.py",
       "../runtime/providers/anthropic.py": "runtime/providers/anthropic.py",
       "../runtime/providers/google.py": "runtime/providers/google.py",
-      "../runtime/providers/chatgpt.py": "runtime/providers/chatgpt.py"
+      "../runtime/providers/chatgpt.py": "runtime/providers/chatgpt.py",
+      "../runtime/guard/__init__.py": "runtime/guard/__init__.py",
+      "../runtime/guard/schemas.py": "runtime/guard/schemas.py",
+      "../runtime/guard/case_manager.py": "runtime/guard/case_manager.py",
+      "../runtime/guard/observer.py": "runtime/guard/observer.py"
     },
     "icon": [
       "icons/32x32.png",

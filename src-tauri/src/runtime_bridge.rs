@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::io::Read;
+use std::io;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -153,13 +154,16 @@ fn python_executable(root: &Path) -> String {
     if let Ok(path) = env::var("KEPLERV_PYTHON") {
         return path;
     }
-    for candidate in [
-        root.join(".venv/bin/python"),
-        root.join(".venv/bin/python3"),
-    ] {
-        if candidate.is_file() {
-            return candidate.to_string_lossy().into_owned();
+    // In development, Tauri resolves bundled runtime files from target/debug,
+    // while the project's virtual environment lives several directories above.
+    let mut directory = Some(root);
+    while let Some(current) = directory {
+        for candidate in [current.join(".venv/bin/python"), current.join(".venv/bin/python3")] {
+            if candidate.is_file() {
+                return candidate.to_string_lossy().into_owned();
+            }
         }
+        directory = current.parent();
     }
     let mac_python = "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12";
     if Path::new(mac_python).is_file() {
@@ -300,6 +304,7 @@ fn start_locked(app: &AppHandle, slot: &mut Option<ManagedRuntime>) -> Result<Va
     let token = random_token()?;
     let port = available_port()?;
     let base_url = format!("http://127.0.0.1:{port}");
+    // Uvicorn reports bind and import failures on stdout; capture both streams until health is confirmed.
     let mut command = Command::new(python_executable(&root));
     command
         .args(["-m", "runtime.main"])
@@ -313,8 +318,8 @@ fn start_locked(app: &AppHandle, slot: &mut Option<ManagedRuntime>) -> Result<Va
         .env("KEPLERV_DATA_DIR", &data_dir)
         .env("PYTHONPATH", &root)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let saved_config = read_model_config(app).unwrap_or_else(|| ModelConfig { provider: "meta".into(), endpoint: "https://api.meta.ai/v1".into(), model: "muse-spark-1.3".into() });
     let provider = env::var("KEPLERV_MODEL_PROVIDER").unwrap_or(saved_config.provider);
     let model = env::var("KEPLERV_MODEL_NAME").unwrap_or(saved_config.model);
@@ -339,7 +344,7 @@ fn start_locked(app: &AppHandle, slot: &mut Option<ManagedRuntime>) -> Result<Va
         }
     }
     command.env("KEPLERV_MODEL_PROVIDER", &provider).env("KEPLERV_MODEL_NAME", &model).env("KEPLERV_MODEL_BASE_URL", &endpoint);
-    let child = command.spawn().map_err(|_| "Could not start Python 3.12 runtime. Install runtime/requirements.txt and select Python with KEPLERV_PYTHON if needed.".to_string())?;
+    let mut child = command.spawn().map_err(|_| "Could not start Python 3.12 runtime. Install runtime/requirements.txt and select Python with KEPLERV_PYTHON if needed.".to_string())?;
     let client = authorized_client()?;
     let mut ready = false;
     for _ in 0..60 {
@@ -353,7 +358,34 @@ fn start_locked(app: &AppHandle, slot: &mut Option<ManagedRuntime>) -> Result<Va
         let mut child = child;
         let _ = child.kill();
         let _ = child.wait();
-        return Err("Python runtime did not become ready. Check that FastAPI, Uvicorn, and runtime dependencies are installed.".into());
+        let mut startup_error = String::new();
+        if let Some(mut stdout) = child.stdout.take() {
+            let _ = stdout.read_to_string(&mut startup_error);
+        }
+        if let Some(mut stderr) = child.stderr.take() {
+            if !startup_error.is_empty() {
+                startup_error.push('\n');
+            }
+            let _ = stderr.read_to_string(&mut startup_error);
+        }
+        let detail = startup_error.trim().chars().take(500).collect::<String>();
+        let message = if detail.is_empty() {
+            "Python runtime did not become ready. Check that FastAPI, Uvicorn, and runtime dependencies are installed.".to_string()
+        } else {
+            format!("Python runtime failed during startup: {detail}")
+        };
+        return Err(message);
+    }
+    // Drain both pipes after startup so later runtime logs cannot block the Python child.
+    if let Some(mut output) = child.stdout.take() {
+        thread::spawn(move || {
+            let _ = io::copy(&mut output, &mut io::sink());
+        });
+    }
+    if let Some(mut output) = child.stderr.take() {
+        thread::spawn(move || {
+            let _ = io::copy(&mut output, &mut io::sink());
+        });
     }
     let stop = Arc::new(AtomicBool::new(false));
     let poller = spawn_event_poller(
@@ -692,7 +724,8 @@ pub fn runtime_create_run(
     goal_title: String,
     goal_description: String,
     task: String,
-    source_url: String,
+    source_url: Option<String>,
+    token_budget: u32,
 ) -> Result<Value, String> {
     ensure_main_window(&window)?;
     let slot = state
@@ -710,7 +743,7 @@ pub fn runtime_create_run(
         "/runs",
         json!({
             "goal_id":goal_id,"goal_title":goal_title,"goal_description":goal_description,
-            "task":task,"source_url":source_url,"step_budget":12,"token_budget":12000
+            "task":task,"source_url":source_url,"step_budget":16,"token_budget":token_budget
         }),
     )
 }

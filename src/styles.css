@@ -255,6 +255,12 @@ button,select,input,textarea { min-height:44px; }
   .goal-picker { font-size:16px; }
   .simple-mode .ribbon-buttons button { min-height:44px; }
 }
+.guard-case-list { display:grid; gap:10px; margin:18px 0; }
+.guard-case-row { display:grid; gap:7px; width:100%; padding:16px; border:1px solid var(--line); border-radius:15px; background:var(--surface); color:var(--text); text-align:left; cursor:pointer; }
+.guard-case-row:hover,.guard-case-row.guard-case-selected { border-color:var(--accent); box-shadow:0 0 0 2px var(--accent-dim); }
+.guard-case-row b { font-size:15px; }
+.guard-case-row small,.guard-case-row p { margin:0; color:var(--muted); font-size:12px; line-height:1.5; }
+.guard-case-severity { justify-self:start; padding:4px 7px; border-radius:999px; background:var(--accent-dim); color:var(--accent); font-size:10px; font-weight:700; letter-spacing:.08em; }
 .provider-panel-intro { padding:18px 0 8px; }
 .provider-panel-intro p { margin:0 0 7px; font-size:14px; line-height:1.5; }
 .provider-panel-intro small { color:var(--muted); font-size:12px; line-height:1.5; }
@@ -485,6 +491,9 @@ button,select,input,textarea { min-height:44px; }
 .resource-address span { color:var(--muted); font-size:11px; }
 .resource-frame { width:100%; height:100%; border:0; background:#fff; }
 .resource-frame-note { display:flex; align-items:center; justify-content:center; gap:4px; border-top:1px solid var(--line); color:var(--muted); font-size:11px; }
+.panel-heading { position:sticky; top:0; z-index:3; margin:-26px -27px 18px; padding:26px 27px 18px; background:var(--bg); box-shadow:0 1px 0 var(--line); }
+.panel-back { min-height:42px; display:inline-flex; align-items:center; gap:7px; padding:0 12px; border:1px solid var(--line); border-radius:11px; background:var(--surface); color:var(--text); font-size:13px; font-weight:550; cursor:pointer; white-space:nowrap; }
+.panel-back:hover { border-color:var(--accent); color:var(--accent); background:var(--accent-dim); }
 @media(max-width:700px) {
   .resource-immersive { grid-template-rows:60px minmax(0,1fr) 44px; }
   .resource-toolbar { grid-template-columns:auto minmax(0,1fr) auto; gap:7px; padding-inline:9px; }

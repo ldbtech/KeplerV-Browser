@@ -32,14 +32,16 @@ class RunRequest(StrictModel):
     goal_id: str = Field(min_length=1, max_length=128)
     goal_title: str = Field(min_length=1, max_length=240)
     goal_description: str = Field(min_length=1, max_length=8000)
-    task: str = Field(default="Research this page and summarize three findings.", min_length=1, max_length=2000)
-    source_url: HttpUrl
-    step_budget: int = Field(default=12, ge=1, le=24)
-    token_budget: int = Field(default=12000, ge=1000, le=50000)
+    task: str = Field(default="Search the public web for relevant sources and summarize three source-backed findings.", min_length=1, max_length=2000)
+    source_url: HttpUrl | None = None
+    step_budget: int = Field(default=16, ge=1, le=24)
+    token_budget: int = Field(default=50000, ge=1000, le=50000)
 
     @field_validator("source_url")
     @classmethod
-    def require_public_https_origin(cls, value: HttpUrl) -> HttpUrl:
+    def require_public_https_origin(cls, value: HttpUrl | None) -> HttpUrl | None:
+        if value is None:
+            return None
         if value.scheme != "https" or value.port not in (None, 443) or value.username or value.password:
             raise ValueError("The research source must be a credential-free HTTPS URL on the standard port.")
         return value

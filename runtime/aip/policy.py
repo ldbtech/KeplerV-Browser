@@ -12,7 +12,7 @@ class AIPDecision:
     reason: str
 
 
-READ_TOOLS = {"browser.navigate", "browser.inspect", "browser.extract_text", "browser.screenshot"}
+READ_TOOLS = {"web.search", "browser.navigate", "browser.inspect", "browser.extract_text", "browser.screenshot"}
 APPROVAL_TOOLS = {"browser.click", "browser.fill"}
 DELEGATION_TOOL = "agent.delegate"
 
@@ -58,7 +58,8 @@ def authorize_tool(
     permissions: set[str],
     tool_name: str,
     arguments: dict,
-    authorized_origin: tuple[str, str, int],
+    authorized_origin: tuple[str, str, int] | None,
+    authorized_origins: set[tuple[str, str, int]] | None = None,
     current_url: str | None = None,
     user_approved: bool = False,
     delegation_allowed: bool = False,
@@ -74,12 +75,17 @@ def authorize_tool(
         return AIPDecision("allow", "Delegation is within the parent's assigned scope and limits.")
     if tool_name not in READ_TOOLS | APPROVAL_TOOLS:
         return AIPDecision("deny", "This tool is not available to the agent.")
+    if tool_name == "web.search":
+        if "browser.read" not in permissions:
+            return AIPDecision("deny", "Web search is outside the agent's permission scope.")
+        return AIPDecision("allow", "Search is limited to the public web search service.")
     target_url = arguments.get("url") if tool_name == "browser.navigate" else current_url
     if not target_url:
         return AIPDecision("deny", "Open the user-authorized page before using browser tools.")
     target = _origin(target_url)
-    if target is None or target != authorized_origin:
-        return AIPDecision("deny", "Browser access is limited to the HTTPS origin the user authorized.")
+    allowed_origins = authorized_origins or ({authorized_origin} if authorized_origin else set())
+    if target is None or target not in allowed_origins:
+        return AIPDecision("deny", "Browser access is limited to HTTPS origins authorized by the user's web search or directly provided by the user.")
     if not public_host_check(target[1]):
         return AIPDecision("deny", "The target resolves to a non-public or unreachable host.")
     capability = "browser.read" if tool_name in READ_TOOLS else "browser.interact"
