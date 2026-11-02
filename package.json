@@ -1,0 +1,29 @@
+{
+  "name": "keplerv-intent-browser",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "svelte-check && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "tauri": "tauri",
+    "desktop": "tauri dev",
+    "desktop:build": "tauri build --bundles app",
+    "test": "vitest run",
+    "test:runtime": ".venv/bin/python -m pytest runtime/tests -q",
+    "test:browser": "KEPLERV_LIVE_BROWSER_TEST=1 .venv/bin/python -m pytest runtime/tests/test_browser_live.py -q"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.8.0",
+    "svelte": "^5.35.0"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^6.2.0",
+    "@tauri-apps/cli": "^2.8.0",
+    "svelte-check": "^4.3.0",
+    "typescript": "~5.8.3",
+    "vite": "^7.1.7",
+    "vitest": "^3.2.4"
+  }
+}

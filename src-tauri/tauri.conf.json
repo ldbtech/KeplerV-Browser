@@ -1,0 +1,70 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "KeplerV",
+  "version": "0.1.0",
+  "identifier": "com.keplerv.intent-browser",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "KeplerV · Your workspace",
+        "width": 1440,
+        "height": 940,
+        "minWidth": 900,
+        "minHeight": 680,
+        "center": true,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "url": "index.html"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost; frame-src https:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": {
+      "../runtime/__init__.py": "runtime/__init__.py",
+      "../runtime/main.py": "runtime/main.py",
+      "../runtime/api.py": "runtime/api.py",
+      "../runtime/models.py": "runtime/models.py",
+      "../runtime/scheduler.py": "runtime/scheduler.py",
+      "../runtime/store.py": "runtime/store.py",
+      "../runtime/requirements.txt": "runtime/requirements.txt",
+      "../runtime/aip/__init__.py": "runtime/aip/__init__.py",
+      "../runtime/aip/policy.py": "runtime/aip/policy.py",
+      "../runtime/browser/__init__.py": "runtime/browser/__init__.py",
+      "../runtime/browser/controller.py": "runtime/browser/controller.py",
+      "../runtime/browser/tools.py": "runtime/browser/tools.py",
+      "../runtime/providers/__init__.py": "runtime/providers/__init__.py",
+      "../runtime/providers/base.py": "runtime/providers/base.py",
+      "../runtime/providers/meta.py": "runtime/providers/meta.py",
+      "../runtime/providers/registry.py": "runtime/providers/registry.py",
+      "../runtime/providers/openai_compatible.py": "runtime/providers/openai_compatible.py",
+      "../runtime/providers/anthropic.py": "runtime/providers/anthropic.py",
+      "../runtime/providers/google.py": "runtime/providers/google.py",
+      "../runtime/providers/chatgpt.py": "runtime/providers/chatgpt.py"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Productivity",
+    "shortDescription": "A workspace for goals and guided work",
+    "longDescription": "Keep goals, work, and supporting resources together in one guided workspace.",
+    "macOS": { "infoPlist": "Info.plist" }
+  }
+}
