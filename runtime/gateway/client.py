@@ -16,12 +16,13 @@ import asyncio
 import json
 import time
 from typing import Any, Callable
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import httpx
 from pydantic import ValidationError
 
 from runtime.gateway import events as gateway_events
+from runtime.gateway.a2a import A2AError, send_message as a2a_send_message
 from runtime.gateway.registry import ExternalAgentRegistry
 from runtime.gateway.schemas import (
     GatewayMessage,
@@ -230,6 +231,83 @@ class TrustGateway:
             )
         except ValidationError as exc:
             raise GatewayValidationError(f"Outbound message failed validation: {exc}") from exc
+
+        if record and record.get("protocol") == "a2a":
+            text = payload.get("text") or payload.get("message")
+            if not isinstance(text, str):
+                text = json.dumps(payload, ensure_ascii=False)
+            try:
+                reply_text, raw_result = await a2a_send_message(
+                    session["endpoint"], text,
+                    context_id=str(uuid5(NAMESPACE_URL, f"keplerv:a2a:{session_id}:{session['external_agent_id']}")),
+                    protocol_version=(record or {}).get("protocol_version") or "1.0",
+                    tenant=(record or {}).get("tenant") or "", timeout_s=timeout_s,
+                    transport=self._transport)
+            except A2AError as exc:
+                if run:
+                    if any(mark in str(exc).casefold() for mark in ("ssrf", "network safety", "endpoint blocked")):
+                        event_kind, event_status = gateway_events.SSRF_BLOCKED, "blocked"
+                        summary = "The Trust Gateway blocked an A2A endpoint at the network safety boundary."
+                    elif "timed out" in str(exc).casefold():
+                        event_kind, event_status = gateway_events.TIMEOUT, "timeout"
+                        summary = "The external A2A agent did not respond within the gateway timeout."
+                    else:
+                        event_kind, event_status = gateway_events.VALIDATION_FAILED, "failed"
+                        summary = "The external A2A response or request failed protocol validation."
+                    self._event(run, event_kind, event_status, {
+                        "session_id": session_id,
+                        "external_agent_id": session["external_agent_id"],
+                        "summary": summary,
+                    })
+                raise GatewayValidationError(str(exc)) from exc
+            inbound = tag_untrusted(GatewayMessage(
+                session_id=session_id, message_id=f"a2a-{uuid4()}",
+                reply_to=outbound.message_id, sender=session["external_agent_id"],
+                recipient=sender, kind="response", label=session["label"],
+                payload={"text": reply_text, "a2a_result": raw_result},
+            ))
+            response_tokens = estimate_tokens(inbound.payload)
+            self._stamp_send(session_id)
+            self._sessions.append_message(
+                session_id, message_id=outbound.message_id, direction="outbound",
+                sender=sender, recipient=session["external_agent_id"], kind=kind,
+                label=session["label"], untrusted=False, payload={"text": text}, tokens=tokens,
+            )
+            self._sessions.append_message(
+                session_id, message_id=inbound.message_id, direction="inbound",
+                sender=inbound.sender, recipient=sender, kind="response",
+                label=session["label"], untrusted=True, payload=inbound.payload,
+                reply_to=outbound.message_id, tokens=response_tokens,
+            )
+            self._sessions.add_usage(session_id, sent=1, received=1, tokens=tokens + response_tokens)
+            self._registry.record_reliability(record["agent_id"], "messages_sent")
+            self._registry.record_reliability(record["agent_id"], "messages_received")
+            if run:
+                self._event(run, gateway_events.MESSAGE_SENT, "success", {
+                    "session_id": session_id, "message_id": outbound.message_id,
+                    "summary": "A2A message sent through the Trust Gateway.",
+                })
+                self._event(run, gateway_events.MESSAGE_RECEIVED, "success", {
+                    "session_id": session_id, "message_id": inbound.message_id,
+                    "untrusted": True, "summary": "A2A response received as untrusted data.",
+                })
+                from runtime.guard.behavior_classification import classify_exchange
+                screening = classify_exchange([{
+                    "id": inbound.message_id, "message_id": inbound.message_id,
+                    "direction": "inbound", "untrusted": True,
+                    "payload": inbound.payload,
+                }])
+                if screening["classification"] in {"injection", "unauthorized-request", "policy-violation"}:
+                    self._event(run, "gateway.external_behavior_flagged", "flagged", {
+                        "session_id": session_id,
+                        "external_agent_id": session["external_agent_id"],
+                        "classification": screening["classification"],
+                        "evidence_refs": screening["evidence_refs"],
+                        "observed_markers": screening["observed_markers"],
+                        "classifier_label": screening["classifier_label"],
+                        "summary": "Guard flagged observable risk markers in an external A2A reply.",
+                    })
+            return inbound
 
         headers = self._auth_headers(record, auth_token)
         try:

@@ -22,6 +22,14 @@ def assess_rule_risk(event: dict[str, Any]) -> tuple[str, str, str] | None:
         return "medium", "external_contradiction", (
             "An external exchange contradicts trusted catalog or ledger evidence."
         )
+    if event_type == "gateway.external_behavior_flagged":
+        payload = event.get("payload", {})
+        classification = str(payload.get("classification") or "external_policy_violation")
+        severity = "high" if classification in {"injection", "unauthorized-request"} else "medium"
+        return severity, "external_agent_behavior", (
+            f"Guard detected {classification.replace('-', ' ')} markers in an untrusted external-agent reply. "
+            "The original reply is retained in the Trust Gateway transcript for review."
+        )
     if event_type == "gateway.ssrf_blocked":
         return "high", "gateway_ssrf_blocked", (
             "The Trust Gateway blocked an external-agent endpoint or redirect as an SSRF risk."

@@ -35,6 +35,7 @@ def record_gateway_event(
         SSRF_BLOCKED, LIMIT_EXCEEDED, VALIDATION_FAILED, TIMEOUT,
         "gateway.provenance_unknown_session",
         "gateway.external_contradiction",
+        "gateway.external_behavior_flagged",
     }:
         try:
             guard_observer.observe(event)

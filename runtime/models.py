@@ -36,6 +36,7 @@ class RunRequest(StrictModel):
     source_url: HttpUrl | None = None
     step_budget: int = Field(default=16, ge=1, le=24)
     token_budget: int = Field(default=50000, ge=1000, le=50000)
+    allow_external_agents: bool = False
 
     @field_validator("source_url")
     @classmethod

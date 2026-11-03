@@ -79,6 +79,10 @@ class ExternalAgentRegistry:
         capabilities_declared: list[str] | None = None,
         provenance: dict[str, Any] | None = None,
         auth: dict[str, Any] | None = None,
+        protocol: str = "keplerv-gateway",
+        protocol_version: str = "",
+        display_name: str = "",
+        tenant: str = "",
     ) -> dict[str, Any]:
         """Register (or replace) an external agent record.
 
@@ -95,6 +99,8 @@ class ExternalAgentRegistry:
             raise ValueError("Endpoint must be 1-2000 characters.")
         if identity_status not in IDENTITY_STATUSES:
             raise ValueError(f"Unknown identity status '{identity_status}'. Expected one of {', '.join(IDENTITY_STATUSES)}.")
+        if protocol not in {"keplerv-gateway", "a2a"}:
+            raise ValueError("Unsupported external agent protocol.")
         if provenance is None or not str(provenance.get("asserted_by", "")).strip():
             raise ValueError("Provenance with 'asserted_by' is required.")
         _reject_secrets({"provenance": provenance, "capabilities_declared": capabilities_declared, "auth": auth})
@@ -104,6 +110,10 @@ class ExternalAgentRegistry:
         record = {
             "agent_id": agent_id,
             "endpoint": endpoint,
+            "protocol": protocol,
+            "protocol_version": protocol_version[:16],
+            "display_name": display_name[:200],
+            "tenant": tenant[:256],
             "identity_status": identity_status,
             "capabilities_declared": sorted(set(capabilities_declared or [])),
             "capabilities_observed": [],

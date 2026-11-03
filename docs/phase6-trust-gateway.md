@@ -1,9 +1,27 @@
 # Phase 6: Trust Gateway
 
-External agents (the fictional marketplace merchants) talk to KeplerV only
-through the Trust Gateway. There is no direct-contact path: every
+External agents talk to KeplerV only through the Trust Gateway. There is no
+direct-contact path: every
 cross-boundary message is SSRF-checked, schema-validated, correlated,
 budgeted, and recorded in a per-session transcript.
+
+The user-facing gateway also supports real public A2A agents. For a goal where
+external contact is enabled, discovery reads the A2A Agent Card from
+`/.well-known/agent-card.json` (with the older `/.well-known/agent.json`
+fallback), and text requests use the card's JSON-RPC interface. KeplerV
+supports public HTTPS cards with no required authentication and A2A protocol
+versions 1.0 and 0.3. It does not scan the internet or claim there is a single
+global agent directory. The user can provide a card URL, or the researcher may
+find one indexed by ordinary web search. Opening a session and every outbound
+message still require explicit human approval through AIP. Agent Card and
+message content remain untrusted. Authenticated agents, streaming, and
+file/image parts are not supported by this adapter yet.
+
+Inbound A2A text is screened in the background for observable prompt-override,
+credential-request, coercion, and redirect markers. A match adds evidence to
+the session's Guard case. The deterministic screen is a narrow heuristic; it
+does not guarantee detection of novel attacks or make claims about an agent's
+intent.
 
 ## Trust tiers
 

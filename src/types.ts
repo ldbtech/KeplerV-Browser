@@ -20,7 +20,7 @@ export interface EmailDraft { to: string; subject: string; body: string; account
 
 export type GatewayIdentityStatus = "verified" | "self_declared" | "unknown" | "suspected";
 export type GatewaySessionStatus = "open" | "closed" | "cancelled";
-export interface ExternalAgentInfo { agent_id: string; endpoint: string; identity_status: GatewayIdentityStatus; capabilities_declared: string[]; capabilities_observed: string[]; provenance: { asserted_by: string; asserted_at: string; evidence_refs: string[] }; reliability: Record<string, number>; }
+export interface ExternalAgentInfo { agent_id: string; endpoint: string; protocol?: string; display_name?: string; protocol_version?: string; identity_status: GatewayIdentityStatus; capabilities_declared: string[]; capabilities_observed: string[]; provenance: { asserted_by: string; asserted_at: string; evidence_refs: string[] }; reliability: Record<string, number>; }
 export interface GatewaySessionInfo { id: string; run_id: string; agent_id: string; external_agent_id: string; endpoint: string; status: GatewaySessionStatus; label: string; messages_sent: number; messages_received: number; tokens_used: number; created_at: string; updated_at: string; }
 export interface GatewayMessageInfo { id: string; message_id: string; reply_to?: string | null; direction: string; sender: string; recipient: string; kind: string; label: string; untrusted: boolean; payload: Record<string, unknown>; created_at: string; }
 export interface ClaimRecord { id: string; kind: string; summary: string; product_id?: string; message_id: string; statement_ref: string; }

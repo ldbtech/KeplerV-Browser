@@ -980,6 +980,7 @@ pub fn runtime_create_run(
     task: String,
     source_url: Option<String>,
     token_budget: u32,
+    allow_external_agents: bool,
 ) -> Result<Value, String> {
     ensure_main_window(&window)?;
     let slot = state
@@ -997,7 +998,8 @@ pub fn runtime_create_run(
         "/runs",
         json!({
             "goal_id":goal_id,"goal_title":goal_title,"goal_description":goal_description,
-            "task":task,"source_url":source_url,"step_budget":16,"token_budget":token_budget
+            "task":task,"source_url":source_url,"step_budget":16,"token_budget":token_budget,
+            "allow_external_agents":allow_external_agents
         }),
     )
 }

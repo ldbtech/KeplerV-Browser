@@ -95,7 +95,7 @@ export function buildExternalNodes(
     const record = byId.get(agentId);
     return {
       agentId,
-      displayName: shortAgentName(agentId),
+      displayName: record?.display_name || shortAgentName(agentId),
       sessionIds: items.map((item) => item.id),
       openSessions: items.filter((item) => item.status === "open").length,
       badge: tierBadge(record?.identity_status ?? "unknown"),

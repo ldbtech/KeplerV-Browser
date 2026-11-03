@@ -25,6 +25,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from runtime.gateway.client import TrustGateway
+from runtime.gateway.a2a import A2AError, fetch_card
 from runtime.gateway.registry import IDENTITY_STATUSES, SECRET_FIELD_NAMES
 from runtime.merchants.discovery import DiscoveryError, discover_agents
 from runtime.verification import claims as claim_service
@@ -183,26 +184,42 @@ class GatewayTools:
         """Fetch capability descriptors from explicit endpoints; register them."""
         if not bases or len(bases) > MAX_DISCOVERY_BASES:
             raise DiscoveryError("Discovery needs 1-8 explicitly configured endpoints.")
-        descriptors = await discover_agents(
-            list(bases),
-            allowlist=set(self._fixture_allowlist),
-            auth_token=self._fixture_token,
-            transport=self._transport,
-        )
+        descriptors: list[dict[str, Any]] = []
+        for base in bases:
+            try:
+                descriptors.append(await fetch_card(base, transport=self._transport))
+            except A2AError as a2a_error:
+                # Fixture descriptors remain for the project's isolated test
+                # harness. Public agents must publish a real A2A Agent Card.
+                if not self._fixture_allowlist:
+                    raise a2a_error
+                try:
+                    descriptors.extend(await discover_agents(
+                        [base], allowlist=set(self._fixture_allowlist),
+                        auth_token=self._fixture_token, transport=self._transport,
+                    ))
+                except Exception:
+                    raise a2a_error
         registered: list[dict[str, Any]] = []
         for descriptor in descriptors:
             identity_claim = descriptor.get("identity_claim")
             identity_status = identity_claim if identity_claim in IDENTITY_STATUSES else "unknown"
+            is_a2a = descriptor.get("protocol") == "A2A"
             record = self._registry.register(
                 str(descriptor["agent_id"]),
                 endpoint=str(descriptor["endpoint"]),
                 identity_status=identity_status,
-                capabilities_declared=[str(item) for item in descriptor.get("capabilities_declared", [])],
+                capabilities_declared=[str(item) for item in descriptor.get("capabilities_declared", [])]
+                or [str(item.get("name") or item.get("id") or "") for item in descriptor.get("skills", []) if isinstance(item, dict)],
                 provenance={
                     "asserted_by": f"local-agent:{run['agent_id']}",
                     "evidence_refs": [f"discovery:{descriptor.get('capabilities_url', descriptor['endpoint'])}"],
                 },
-                auth={"type": "bearer-header" if self._fixture_token else "none"},
+                auth={"type": "bearer-header" if self._fixture_token and not is_a2a else "none"},
+                protocol="a2a" if is_a2a else "keplerv-gateway",
+                protocol_version=str(descriptor.get("protocol_version") or ""),
+                display_name=str(descriptor.get("name") or ""),
+                tenant=str(descriptor.get("tenant") or ""),
             )
             registered.append({
                 "agent_id": record["agent_id"],
@@ -211,6 +228,10 @@ class GatewayTools:
                 "capabilities_declared": record["capabilities_declared"],
                 "fixture": descriptor.get("fixture"),
                 "surface_label": descriptor.get("surface_label"),
+                "protocol": record["protocol"],
+                "name": descriptor.get("name"),
+                "description": descriptor.get("description"),
+                "skills": descriptor.get("skills", []),
             })
         self._store.add_event(run, "gateway.discover.completed", "success", {
             "summary": f"Discovered {len(registered)} external agent(s) from explicit endpoints.",

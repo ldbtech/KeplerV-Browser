@@ -1,13 +1,14 @@
 # Phase 6 — Federated trust gateway: capability matrix
 
 Honest real/experimental/unsupported status for the Phase 6 milestone.
-External agents (the fictional marketplace merchants) reach KeplerV only
-through the Trust Gateway: every cross-boundary message is SSRF-checked,
-schema-validated, correlated, budgeted, and recorded in a per-session
-transcript. All demo data is fictional (Fictional KeplerV Bazaar, fictional
-KeplerV credits — no real products, funds, or purchases). Fake, live, and
-replay surfaces are always labeled; nothing silently substitutes simulation
-for live behavior.
+KeplerV now has a real A2A path for public, unauthenticated JSON-RPC agents:
+users opt in per goal, provide an Agent Card URL (or ask the researcher to
+locate one through ordinary web search), and approve each session and outbound
+message. Every cross-boundary message is SSRF-checked, correlated, budgeted,
+and recorded in a per-session transcript. A2A does not provide a universal
+agent directory, so discovery is limited to an endpoint supplied by the user
+or one indexed by web search. Fixture merchants remain in the developer test
+harness only and are not a source of real-world agents.
 
 See also `phase6-trust-gateway.md` (protocol, tiers, SSRF rules, verdicts)
 and `phase6-eval.md` (eval arms, scenarios, metrics).
@@ -16,16 +17,17 @@ and `phase6-eval.md` (eval arms, scenarios, metrics).
 
 | Area | Status | What is real | What is not / limits |
 | --- | --- | --- | --- |
+| Public A2A interoperability | Real, opt-in | Agent Card discovery at the standard well-known paths; JSON-RPC messaging for A2A 1.0 and 0.3; human approval for opening sessions and each outbound message; transcripts and responses flow through the Trust Gateway | Public HTTPS and unauthenticated agents only; JSON-RPC text messages only; no universal directory, OAuth/API-key onboarding, streaming, or file-part transport yet |
 | External-agent registry | Real | Tiered identity (`verified`/`self_declared`/`unknown`/`suspected`), declared-vs-observed capabilities, asserted-by provenance, reliability counters; secret-bearing fields rejected at registration | Tiers are fixture-driven; no real-world identity provider backs `verified` |
 | Trust Gateway transport | Real | Exclusive cross-boundary path: SSRF-checked endpoints, none/bearer-header auth with explicit per-call tokens, strict `extra=forbid` envelopes, `reply_to` correlation, untrusted tagging of inbound, no auto-redirects with per-hop re-validation, timeouts, cancel flags, per-minute + min-interval rate limits, message/token/cost budgets, per-message ledger events + Guard hook; sqlite transcript store | Loopback merchant fixtures allowed only via an explicit `host:port` allowlist (param or `KEPLERV_GATEWAY_FIXTURE_ALLOWLIST`); plain HTTP otherwise denied |
 | SSRF protection | Real | `https` only (except allowlisted loopback fixtures); every resolved DNS IP must be acceptable; localhost/private/link-local/cloud-metadata ranges denied; no credentials in URLs; discovery refuses cross-host redirect hops | Allowlist is the explicit escape hatch for fixtures — anything else stays blocked |
-| Merchant fixtures | Fake (labeled) | 4 deterministic profiles (cooperative / competitive / misleading / adversarial) over fictional catalog data, served via loopback HTTP or socket-free mock transports with identical handlers | Synthetic by design; `fixture=true`, `surface_label=fake` on every descriptor |
+| Merchant fixtures | Developer tests only | 4 deterministic profiles (cooperative / competitive / misleading / adversarial) over fictional catalog data, served via loopback HTTP or socket-free mock transports with identical handlers | Synthetic by design; not offered as real internet agents and not used by the public A2A UI |
 | Negotiation driver | Real logic over fake merchants | Multi-round quote/order flows through the gateway with full transcripts + claim verdicts; frozen goals with per-round drift checks; inbound threat scan + policy-view redaction; credential-request refusal; never fetches inbound URLs | Local policy is the deterministic fake policy (`FAKE` label); no live model negotiates |
 | Claim verification | Real checks, fixture authority | 4 verdicts (`cryptographically-attested` / `independently-observed` / `statement-made` / `unverified`); trusted catalog with SHA-256 manifest; evidence refs are caller-supplied only | Catalog authority is fictional fixture data; attestations are fixture-only HMAC (see below) |
 | AIP gateway matrix | Real enforcement | `gateway.discover`/`close_session` grant-only; `open_session`/`send`/`verify` require grant + explicit approval; denials emit `aip.decision` + `service.access_denied` and open Guard cases | Scheduler dispatch only; no new HTTP grant/revoke routes |
 | Data minimization | Real enforcement | Secret/account/session-bearing outbound fields refuse the whole send, naming fields only (never values); refused sends issue zero gateway POSTs and zero session usage | Field-name matching (compound-key parts); oversized payloads refused by the byte cap |
 | Federated AIP statements | Experimental prototype | HMAC-SHA256 signed statements verify at operator level; tampered/unknown/revoked keys rejected as unverified-signature; delegation/receipt proof levels only with valid covering credentials; signed-is-not-true is tested | Symmetric HMAC only (stdlib `hmac`/`hashlib`, no custom crypto) — production use requires asymmetric signatures with KMS-held keys; fixture keys never touch the keychain |
-| Guard behavioral classification | Experimental rules | 8 deterministic observable-only classes incl. held-out phrasing variants; firm bargaining stays legitimate; discount framing is persuasion, bare below-catalog prices are misleading | Fixed rules labeled `fake-rules-v1`, not a live-model judgment; no intent claims |
+| Guard behavioral classification | Experimental rules | A2A inbound replies are screened in the background for observable instruction overrides, credential requests, coercion, and redirect markers; flags are attached to the session's Guard case and transcript; firm bargaining is not itself suspicious | Fixed deterministic rules labeled `fake-rules-v1`, not a live-model judgment; no intent claims and no guarantee of detecting novel attacks |
 | Guard external investigation | Experimental rules | Pure analysis (no gateway handle, so no I/O): sanitized Detective transcripts, catalog+ledger contradiction detection, verdicts, classification, gateway-bound follow-ups, abstention on thin evidence; contradictions open `external_contradiction` cases | Same `fake-rules-v1` caveat; follow-ups are data the local agent must issue via `gateway.send` |
 | Phase 6 eval runner | Real harness, fake adapters | AIP-only vs passive-observer vs active-investigation over dev + held-out splits; all metrics measured from transcripts/verdicts/AIP/usage/latency; determinism digest; errors recorded, never invented | No live-model path; the live loopback transport requires explicit `KEPLERV_PHASE6_LIVE_EVAL=1` and is still fictional data |
 | Voice inspection | Real intents, fixture data | 5 new intent types with known-id validation (invented ids → clarification); verification/close routes are Bearer-authed; STOP_TALKING_TO navigates, never closes by voice | Answers come only from fetched session records; closing stays a human-confirmed button |
