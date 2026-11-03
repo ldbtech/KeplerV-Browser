@@ -8,6 +8,22 @@ from runtime.aip.policy import SERVICE_TOOLS
 def assess_rule_risk(event: dict[str, Any]) -> tuple[str, str, str] | None:
     """Deterministic high-signal screening; model judgments never replace AIP policy."""
     event_type = event.get("type")
+    if event_type == "gateway.ssrf_blocked":
+        return "high", "gateway_ssrf_blocked", (
+            "The Trust Gateway blocked an external-agent endpoint or redirect as an SSRF risk."
+        )
+    if event_type == "gateway.provenance_unknown_session":
+        return "medium", "provenance_unknown_session", (
+            "A gateway session opened to an external agent with unknown or suspected identity."
+        )
+    if event_type == "gateway.limit_exceeded":
+        return "medium", "gateway_limit_exceeded", (
+            "A gateway session exceeded its message, token, or cost budget."
+        )
+    if event_type == "gateway.validation_failed":
+        return "medium", "gateway_validation_failed", (
+            "An external agent sent a message that failed strict gateway validation."
+        )
     if event_type == "service.access_denied":
         tool = str(event.get("tool") or "unknown service")
         return "high", "service_access_denied", (

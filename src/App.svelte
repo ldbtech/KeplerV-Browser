@@ -4,7 +4,7 @@
   import { listen } from "@tauri-apps/api/event";
   import type { Agent, AppState, ConnectedAccount, EmailDraft, Evidence, Goal, KeplerEvent, MailMessage, MediaFocusState, MediaSurfaceId, Resource, ServiceProviderId } from "./types";
   import { accountKey, parseAccountKey, resolveAccount } from "./experience/accountResolver";
-  import { applyMediaCommand, createSurfaceState, duckForSpeech, LOCAL_DEMO_VIDEO_URL, NETFLIX_FALLBACK_LABEL, NETFLIX_URL, probeYouTubeEmbed, resolveMediaTarget, surfaceLabel, youtubeEmbedUrl } from "./experience/surfaceManager";
+  import { applyMediaCommand, createSurfaceState, duckForSpeech, LOCAL_DEMO_CAPTIONS_URL, LOCAL_DEMO_VIDEO_URL, NETFLIX_FALLBACK_LABEL, NETFLIX_URL, probeYouTubeEmbed, resolveMediaTarget, surfaceLabel, youtubeEmbedUrl } from "./experience/surfaceManager";
   import { initialState, makeId, STORAGE_KEY } from "./simulation/seed";
   import { addTask, advanceSimulationClock, appendEvent, auditAction, canSpawn, createAgent, createGoal, modifyGoal, setOfflineMode, spawnSubagent, transitionAgent } from "./simulation/runtime";
   import { VoiceRecorder } from "./voice/recorder";
@@ -1318,7 +1318,7 @@
     <section class="media-immersive" aria-label={`Media surface: ${surfaceLabel(mediaSurface)}`}>
       <header class="media-toolbar"><button class="media-back" onclick={() => closeMedia()}>← <span>Back to workspace</span></button><div class="media-address"><b>{surfaceLabel(mediaSurface)}</b><span>ONE AUDIBLE SURFACE · VOICE DUCKS MEDIA</span></div><div class="media-switch"><button class:media-on={mediaSurface === "local-video"} onclick={() => openMediaSurface("local-video")}>Local</button><button class:media-on={mediaSurface === "youtube"} onclick={() => openMediaSurface("youtube")}>YouTube</button><button class:media-on={mediaSurface === "netflix-fallback"} onclick={() => openMediaSurface("netflix-fallback")}>Netflix</button></div></header>
       {#if mediaSurface === "local-video"}
-        <video class="media-video" bind:this={localVideoEl} src={LOCAL_DEMO_VIDEO_URL} controls playsinline preload="metadata" title="KeplerV local demo fixture"><track kind="captions" src="/media/keplerv-demo.en.vtt" srclang="en" label="English" /></video>
+        <video class="media-video" bind:this={localVideoEl} src={LOCAL_DEMO_VIDEO_URL} controls playsinline preload="metadata" title="KeplerV local demo fixture"><track kind="captions" src={LOCAL_DEMO_CAPTIONS_URL} srclang="en" label="English" /></video>
         <div class="media-frame-note"><span>LOCAL FIXTURE · generated test pattern, no licensed content</span><span class="media-transport"><button onclick={() => pauseMedia()}>Pause</button><button onclick={() => resumeMedia()}>Resume</button><button onclick={() => closeMedia()}>Close</button></span></div>
       {:else if mediaSurface === "youtube"}
         {#if youtubeSrc}<iframe class="media-frame" bind:this={youtubeFrameEl} src={youtubeSrc} title="YouTube embed" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>

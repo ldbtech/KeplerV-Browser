@@ -10,6 +10,7 @@ export const MEDIA_SURFACES: MediaSurfaceId[] = ["local-video", "youtube", "netf
 export const NETFLIX_FALLBACK_LABEL = "Opens in system browser — embedded Netflix not supported";
 export const NETFLIX_URL = "https://www.netflix.com/";
 export const LOCAL_DEMO_VIDEO_URL = "/media/keplerv-demo.mp4";
+export const LOCAL_DEMO_CAPTIONS_URL = "/media/keplerv-demo.en.vtt";
 export const YOUTUBE_VIDEO_ID_PATTERN = /^[A-Za-z0-9_-]{11}$/;
 
 export function createSurfaceState(): MediaFocusState {

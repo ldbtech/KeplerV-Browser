@@ -17,6 +17,8 @@ from runtime.services.registry import STATUS_CONNECTED
 from runtime.voice.transcribe import MetaVoiceTranscriber, VoiceTranscriptionError
 from runtime.voice.intent import InterpretationError, InterpretRequest, interpret as interpret_voice_command
 from runtime.demo.university import PAGES, page_html
+from runtime.gateway.registry import ExternalAgentRegistry
+from runtime.gateway.sessions import GatewaySessionStore
 
 
 def create_app(service: RuntimeService | None = None) -> FastAPI:
@@ -313,6 +315,35 @@ def create_app(service: RuntimeService | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    def _gateway_stores(service: RuntimeService) -> tuple[GatewaySessionStore, ExternalAgentRegistry]:
+        data_dir = service.store.db_path.parent
+        return GatewaySessionStore(service.store.db_path), ExternalAgentRegistry(data_dir / "gateway" / "agents.json")
+
+    @app.get("/gateway/agents")
+    async def list_gateway_agents(request: Request, _: None = Depends(authenticated)):
+        _, registry = _gateway_stores(request.app.state.runtime_service)
+        return {"agents": registry.list_agents()}
+
+    @app.get("/gateway/sessions")
+    async def list_gateway_sessions(request: Request, run_id: str | None = None, _: None = Depends(authenticated)):
+        sessions, _ = _gateway_stores(request.app.state.runtime_service)
+        return {"sessions": sessions.list_sessions(run_id)}
+
+    @app.get("/gateway/sessions/{session_id}")
+    async def get_gateway_session(session_id: str, request: Request, _: None = Depends(authenticated)):
+        sessions, _ = _gateway_stores(request.app.state.runtime_service)
+        session = sessions.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Gateway session not found.")
+        return session
+
+    @app.get("/gateway/sessions/{session_id}/transcript")
+    async def get_gateway_transcript(session_id: str, request: Request, _: None = Depends(authenticated)):
+        sessions, _ = _gateway_stores(request.app.state.runtime_service)
+        if not sessions.get_session(session_id):
+            raise HTTPException(status_code=404, detail="Gateway session not found.")
+        return {"session_id": session_id, "messages": sessions.list_transcript(session_id)}
 
     return app
 

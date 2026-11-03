@@ -39,6 +39,11 @@ SERVICE_TOOL_PERMISSION = {
     "github.publish": "github.publish",
     "media.open": "media.open",
     "media.control": "media.control",
+    "gateway.discover": "gateway.read",
+    "gateway.open_session": "gateway.send",
+    "gateway.close_session": "gateway.send",
+    "gateway.send": "gateway.send",
+    "gateway.verify": "gateway.verify",
 }
 SERVICE_TOOLS = frozenset(SERVICE_TOOL_PERMISSION)
 SERVICE_PERMISSIONS = frozenset(SERVICE_TOOL_PERMISSION.values())
@@ -48,6 +53,7 @@ SERVICE_PERMISSIONS = frozenset(SERVICE_TOOL_PERMISSION.values())
 SENSITIVE_SERVICE_TOOLS = frozenset({
     "gmail.send", "mail.send", "calendar.create", "calendar.delete",
     "drive.share", "github.publish",
+    "gateway.open_session", "gateway.send", "gateway.verify",
 })
 SENSITIVE_SERVICE_PERMISSIONS = frozenset(
     SERVICE_TOOL_PERMISSION[tool] for tool in SENSITIVE_SERVICE_TOOLS

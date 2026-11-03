@@ -56,7 +56,18 @@ npm run test:runtime
 npm run test:browser
 npm test
 npm run build
-cargo check --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+Phase 5 gates (no live-model evals; `test_demo.py` needs loopback sockets and is
+deselected inside sandboxes — see `docs/phase5-capabilities.md`):
+
+```sh
+.venv/bin/python -m pytest runtime/tests -q --deselect runtime/tests/test_demo.py
+.venv/bin/python -m pytest runtime/tests/test_phase5_scenarios.py -q
+npx vitest run src/experience/scenarioA.localVideo.test.ts
+cargo test --manifest-path src-tauri/Cargo.toml
+npm run build
 ```
 
 The deterministic Python workflow exercises orchestration, AIP denial, event persistence, and source-checked evidence. A separate browser integration test below uses real Playwright Chromium. A live Meta API call requires internet access and `MODEL_API_KEY`.
@@ -112,6 +123,15 @@ Then open any goal and use the "Use fictional demo fixtures" button to point res
 | Tracing and replay | `GET /runs/{id}/trace` exports events, evidence, cases, and stage latencies; `runtime.experiments.replay` verifies and plays traces back labeled REPLAY without model calls |
 | UB schedule PDF | Existing guided product demonstration; it is not produced by the research runtime |
 | Legacy sample goals and agents | Existing workspace examples remain local; Guard cases now come from actual runtime AIP decisions |
+| Local video | Real `<video>` playback of a bundled generated fixture (`public/media/keplerv-demo.mp4` + WebVTT captions, no licensed content) with single-audio-focus, voice ducking, and transport controls; voice `OPEN/PAUSE/RESUME/CLOSE_MEDIA` wired via `/interpret` |
+| YouTube | Real official `youtube-nocookie` iframe embed with capability probe and 11-char id validation; requires a user-pasted id (none ships) and network; KeplerV never fetches or rehosts video |
+| Netflix | External system-browser fallback only; embedded playback is unsupported (DRM) and no workaround is attempted — never claimed |
+| Service accounts (OAuth) | Real PKCE flow (S256, state/nonce, loopback callback, refresh, revoke) with keychain token storage under `oauth:{provider}:{account}`; public client IDs only via `KEPLERV_OAUTH_CLIENT_ID_*` or `oauth-client-ids.json`; no IDs ship so live sign-in is unexercised; Python holds metadata only, never tokens |
+| Email read | Fake-mail fixture (3 fictional messages, every payload FAKE-labeled) served over token-authed `/mail/*` routes; Gmail client is real but fails closed as not-connected (keychain tokens not bridged to Python); Outlook is a labeled skeleton; ambiguous references return candidates, never auto-pick |
+| Email send | Fake-mail outbox only, after AIP grant plus explicit approval; voice can only request approval; real-provider send fails loudly with "Nothing was sent" — no live send path by design |
+| Service permissions | 13 service tools gated on exact per-agent/per-goal grants with immediate revoke, approval for sensitive ops, `service.access_denied` events, and high-severity Guard cases; unauthorized sends are denied with an empty outbox (Scenario C) |
+
+See `docs/phase5-capabilities.md` for the full honest real-vs-fake matrix, verification scenarios, and module map.
 
 The native resource-window feature remains separate from the agent research browser. A research agent uses its isolated Playwright context and does not open conventional tabs in the user's visible window. Web search uses DuckDuckGo's public HTML search endpoint; no separate search account or API key is required.
 
@@ -119,7 +139,11 @@ The native resource-window feature remains separate from the agent research brow
 
 - `src/App.svelte` — Intent Space, goal/agent panels, runtime event integration, and existing audio/plan flows.
 - `src/simulation/` — existing goal graph behavior and explicitly local demonstration scenarios.
+- `src/experience/` — media surface manager (audio focus, capability probes) and account resolution.
 - `runtime/` — FastAPI sidecar, Meta adapter, agent scheduler, AIP, Playwright browser gateway, SQLite store, and tests.
+- `runtime/services/` — service registry, account metadata store, and labeled fake fixtures.
+- `runtime/connectors/` — Gmail client, Outlook skeleton, fake-mail adapter, shared account resolver.
+- `src-tauri/src/oauth.rs` — OAuth PKCE flow, keychain token storage, connect/refresh/disconnect commands.
 - `src-tauri/src/runtime_bridge.rs` — managed sidecar process, random token, authenticated native requests, and typed event polling.
 - `src-tauri/src/lib.rs` — Tauri command registration and sidecar lifecycle.
 - `src-tauri/capabilities/default.json` — IPC permissions scoped to the local `main` window.
