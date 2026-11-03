@@ -2,7 +2,7 @@ export type AgentStatus = "working" | "waiting" | "paused" | "completed" | "inve
 export type GoalStatus = "active" | "waiting" | "completed";
 export type EventKind = "goal_created" | "agent_created" | "task_started" | "task_completed" | "agent_paused" | "agent_resumed" | "agent_stopped" | "agent_failed" | "agent_spawned" | "resource_opened" | "policy_allowed" | "policy_denied" | "approval_requested" | "approval_granted" | "approval_denied" | "investigation_started" | "interview_completed" | "goal_task_added" | "simulation_clock_advanced" | "offline_mode_enabled" | "offline_mode_disabled";
 
-export interface Goal { id: string; title: string; description: string; progress: number; status: GoalStatus; tasks: string[]; criteria: string[]; constraints: string[]; createdAt: string; }
+export interface Goal { id: string; title: string; description: string; progress: number; status: GoalStatus; tasks: string[]; criteria: string[]; constraints: string[]; createdAt: string; allowExternalAgents?: boolean; }
 export interface Agent { id: string; name: string; provider: string; model: string; parentAgentId?: string; goalId: string; status: AgentStatus; permissions: string[]; capabilities: string[]; currentTask?: string; createdAt: string; steps: number; error?: string | null; runtime?: boolean; runId?: string; browserIsolated?: boolean; }
 export interface KeplerEvent { id: string; timestamp: string; agentId?: string; goalId?: string; parentEventId?: string; type: EventKind; payload: Record<string, unknown>; }
 export interface Approval { id: string; goalId: string; agentId: string; action: string; amount: number; status: "pending" | "approved" | "denied"; }
