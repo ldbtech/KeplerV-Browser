@@ -16,6 +16,42 @@ class AIPDecision:
 READ_TOOLS = {"web.search", "browser.navigate", "browser.inspect", "browser.extract_text", "browser.screenshot"}
 APPROVAL_TOOLS = {"browser.click", "browser.fill"}
 DELEGATION_TOOL = "agent.delegate"
+#: Read-only legacy mail tools (kept for backward compatibility; new code
+#: uses the gmail.* service tools below).
+MAIL_READ_TOOLS = {"mail.read", "mail.search", "mail.get"}
+
+#: Canonical service tool -> required per-agent/per-goal grant. Grants are
+#: exact strings stored on the run row; there are no wildcard grants
+#: ("calendar.*" in the plan denotes the calendar.* family below, not a
+#: grantable name). "mail.send" is a legacy alias for the same gmail.send
+#: grant so older callers are still gated instead of silently dropped.
+SERVICE_TOOL_PERMISSION = {
+    "gmail.read": "gmail.read",
+    "gmail.search": "gmail.search",
+    "gmail.send": "gmail.send",
+    "mail.send": "gmail.send",
+    "calendar.read": "calendar.read",
+    "calendar.create": "calendar.create",
+    "calendar.delete": "calendar.delete",
+    "drive.read": "drive.read",
+    "drive.share": "drive.share",
+    "github.read": "github.read",
+    "github.publish": "github.publish",
+    "media.open": "media.open",
+    "media.control": "media.control",
+}
+SERVICE_TOOLS = frozenset(SERVICE_TOOL_PERMISSION)
+SERVICE_PERMISSIONS = frozenset(SERVICE_TOOL_PERMISSION.values())
+#: Sensitive service ops: a grant alone is never enough; each execution
+#: also requires explicit human approval (send/share/publish + calendar
+#: writes, which publish to other people).
+SENSITIVE_SERVICE_TOOLS = frozenset({
+    "gmail.send", "mail.send", "calendar.create", "calendar.delete",
+    "drive.share", "github.publish",
+})
+SENSITIVE_SERVICE_PERMISSIONS = frozenset(
+    SERVICE_TOOL_PERMISSION[tool] for tool in SENSITIVE_SERVICE_TOOLS
+)
 
 
 def _origin(url: str) -> tuple[str, str, int] | None:
@@ -92,8 +128,27 @@ def authorize_tool(
         if "delegate" not in permissions or not delegation_allowed:
             return AIPDecision("deny", "Delegation permission or budget is unavailable.")
         return AIPDecision("allow", "Delegation is within the parent's assigned scope and limits.")
-    if tool_name not in READ_TOOLS | APPROVAL_TOOLS:
+    if tool_name not in READ_TOOLS | APPROVAL_TOOLS | MAIL_READ_TOOLS | SERVICE_TOOLS:
         return AIPDecision("deny", "This tool is not available to the agent.")
+    if tool_name in MAIL_READ_TOOLS:
+        if "mail.read" not in permissions:
+            return AIPDecision("deny", "Mail reading is outside the agent's permission scope.")
+        return AIPDecision("allow", "Mail read is limited to connected, non-revoked accounts.")
+    if tool_name in SERVICE_TOOLS:
+        required = SERVICE_TOOL_PERMISSION[tool_name]
+        if required not in permissions:
+            return AIPDecision(
+                "deny",
+                f"Service permission '{required}' is not granted to this agent for this goal.",
+            )
+        if tool_name in SENSITIVE_SERVICE_TOOLS:
+            if user_approved:
+                return AIPDecision("allow", "The user approved this specific sensitive service operation.")
+            return AIPDecision(
+                "require_approval",
+                "Sending, sharing, or publishing through a connected service requires explicit human approval before execution.",
+            )
+        return AIPDecision("allow", "Service read is limited to granted, connected, non-revoked accounts.")
     if tool_name == "web.search":
         if "browser.read" not in permissions:
             return AIPDecision("deny", "Web search is outside the agent's permission scope.")

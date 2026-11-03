@@ -2,7 +2,9 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import type { Agent, AppState, Evidence, Goal, KeplerEvent, Resource } from "./types";
+  import type { Agent, AppState, ConnectedAccount, EmailDraft, Evidence, Goal, KeplerEvent, MailMessage, MediaFocusState, MediaSurfaceId, Resource, ServiceProviderId } from "./types";
+  import { accountKey, parseAccountKey, resolveAccount } from "./experience/accountResolver";
+  import { applyMediaCommand, createSurfaceState, duckForSpeech, LOCAL_DEMO_VIDEO_URL, NETFLIX_FALLBACK_LABEL, NETFLIX_URL, probeYouTubeEmbed, resolveMediaTarget, surfaceLabel, youtubeEmbedUrl } from "./experience/surfaceManager";
   import { initialState, makeId, STORAGE_KEY } from "./simulation/seed";
   import { addTask, advanceSimulationClock, appendEvent, auditAction, canSpawn, createAgent, createGoal, modifyGoal, setOfflineMode, spawnSubagent, transitionAgent } from "./simulation/runtime";
   import { VoiceRecorder } from "./voice/recorder";
@@ -59,7 +61,25 @@
   let connectModel = "gpt-4.1-mini";
   let connectSecret = "";
   let connectingProvider = false;
+  let connectedAccounts: ConnectedAccount[] = [];
+  let connectingService: ServiceProviderId | null = null;
+  let serviceError = "";
+  let mailAccountKey = "";
+  let mailMessages: MailMessage[] = [];
+  let mailQuery = "";
+  let mailSelected: MailMessage | null = null;
+  let mailLoading = false;
+  let mailError = "";
+  let emailDraft: EmailDraft | null = null;
+  let pendingEmailSend: EmailDraft | null = null;
   let resourceView = false;
+  let mediaState: MediaFocusState = createSurfaceState();
+  let mediaView = false;
+  let mediaSurface: MediaSurfaceId | null = null;
+  let youtubeVideoId = "";
+  let youtubeSrc = "";
+  let localVideoEl: HTMLVideoElement | null = null;
+  let youtubeFrameEl: HTMLIFrameElement | null = null;
   let textSize: TextSize = "large";
   let reduceMotion = false;
   let simpleMode = true;
@@ -175,6 +195,7 @@
       chatgptSharing = Boolean(result.chatgpt_sharing);
       if (activeProvider !== "meta" && activeProvider !== "chatgpt") chooseConnectProvider(activeProvider);
     }).catch(() => {});
+    void refreshServiceAccounts();
     let disposed = false;
     void listen<RuntimeEvent>("runtime:event", (event) => mergeRuntimeEvents([event.payload])).then((unlisten) => {
       if (disposed) unlisten(); else runtimeUnlisten = unlisten;
@@ -349,6 +370,37 @@
       connectSecret = "";
       showNotice(error instanceof Error ? error.message : String(error));
     } finally { connectingProvider = false; }
+  }
+  async function refreshServiceAccounts() {
+    try {
+      const result = await invoke<{ accounts: ConnectedAccount[] }>("account_status");
+      connectedAccounts = result.accounts;
+    } catch { connectedAccounts = []; }
+  }
+  async function connectService(provider: ServiceProviderId) {
+    if (connectingService) return;
+    connectingService = provider;
+    serviceError = "";
+    try {
+      const result = await invoke<{ connected: boolean; account: ConnectedAccount }>("oauth_connect", provider === "fake-mail" ? { provider, email: "demo.person@example.test" } : { provider });
+      connectedAccounts = [...connectedAccounts.filter((item) => !(item.provider === result.account.provider && item.email === result.account.email)), result.account];
+      void say(provider === "fake-mail" ? "Fake test mailbox connected." : `${provider} account connected.`);
+      showNotice(provider === "fake-mail" ? "Fake test mailbox connected. Fixtures are labeled and never live mail." : `${result.account.email} connected. Tokens are in the system keychain.`);
+    } catch (error) {
+      serviceError = error instanceof Error ? error.message : String(error);
+      showNotice(serviceError);
+    } finally { connectingService = null; }
+  }
+  async function disconnectService(account: ConnectedAccount) {
+    if (connectingService) return;
+    connectingService = account.provider;
+    try {
+      await invoke<{ disconnected: boolean; remote_revoked: boolean }>("oauth_disconnect", { provider: account.provider, email: account.email });
+      connectedAccounts = connectedAccounts.filter((item) => !(item.provider === account.provider && item.email === account.email));
+      void say(`${account.provider} account disconnected.`);
+      showNotice(`${account.email} disconnected. Its credentials were deleted from the system keychain.`);
+    } catch (error) { showNotice(error instanceof Error ? error.message : String(error)); }
+    finally { connectingService = null; }
   }
   async function activateProviderConnection(provider: string) {
     try {
@@ -623,7 +675,90 @@
     } });
     return speech;
   }
-  function say(text: string): void { voice().announce(text); }
+  function say(text: string): void { duckMediaForSpeech(); voice().announce(text); }
+  function duckMediaForSpeech(): void {
+    const { state, ducked } = duckForSpeech(mediaState);
+    mediaState = state;
+    if (ducked.includes("local-video")) localVideoEl?.pause();
+    if (ducked.includes("youtube")) pauseYoutubeFrame();
+  }
+  function pauseYoutubeFrame(): void {
+    try {
+      youtubeFrameEl?.contentWindow?.postMessage(JSON.stringify({ event: "command", func: "pauseVideo", args: [] }), "https://www.youtube-nocookie.com");
+    } catch {
+      /* cross-origin postMessage is best-effort; focus state is the record */
+    }
+  }
+  function playYoutubeFrame(): void {
+    try {
+      youtubeFrameEl?.contentWindow?.postMessage(JSON.stringify({ event: "command", func: "playVideo", args: [] }), "https://www.youtube-nocookie.com");
+    } catch {
+      /* cross-origin postMessage is best-effort; focus state is the record */
+    }
+  }
+  function pauseInactiveElements(except: MediaSurfaceId): void {
+    if (except !== "local-video") localVideoEl?.pause();
+    if (except !== "youtube") pauseYoutubeFrame();
+  }
+  function openMediaSurface(target: MediaSurfaceId, opts: { videoId?: string } = {}): string {
+    if (target === "youtube") {
+      const probe = probeYouTubeEmbed({ iframeAllowed: typeof document !== "undefined" });
+      const candidate = (opts.videoId ?? youtubeVideoId).trim();
+      const src = youtubeEmbedUrl(candidate);
+      if (!probe.embeddable || !src) {
+        youtubeVideoId = candidate;
+        const message = candidate && !src
+          ? "That YouTube video id looks invalid. Use an 11-character video id."
+          : "Enter an 11-character YouTube video id to embed it with the official player.";
+        showNotice(message);
+        mediaSurface = "youtube"; mediaView = true; panel = null;
+        return message;
+      }
+      youtubeVideoId = candidate;
+      youtubeSrc = src;
+    }
+    const result = applyMediaCommand(mediaState, "OPEN", target);
+    mediaState = result.state;
+    if (result.ok) {
+      pauseInactiveElements(target);
+      mediaSurface = target; mediaView = true; panel = null;
+    }
+    showNotice(result.message);
+    return result.message;
+  }
+  function pauseMedia(target?: MediaSurfaceId | null): string {
+    const result = applyMediaCommand(mediaState, "PAUSE", target ?? mediaSurface);
+    mediaState = result.state;
+    if (result.ok) { localVideoEl?.pause(); pauseYoutubeFrame(); }
+    showNotice(result.message);
+    return result.message;
+  }
+  function resumeMedia(target?: MediaSurfaceId | null): string {
+    const id = target ?? mediaSurface;
+    const result = applyMediaCommand(mediaState, "RESUME", id);
+    mediaState = result.state;
+    if (result.ok && id) {
+      pauseInactiveElements(id);
+      if (id === "local-video") void localVideoEl?.play().catch(() => {});
+      if (id === "youtube") playYoutubeFrame();
+      mediaSurface = id; mediaView = true;
+    }
+    showNotice(result.message);
+    return result.message;
+  }
+  function closeMedia(target?: MediaSurfaceId | null): string {
+    const result = applyMediaCommand(mediaState, "CLOSE_MEDIA", target ?? mediaSurface);
+    mediaState = result.state;
+    localVideoEl?.pause(); pauseYoutubeFrame();
+    if (!target || target === mediaSurface) { mediaView = false; mediaSurface = null; }
+    showNotice(result.message);
+    return result.message;
+  }
+  function openNetflixExternally(): void {
+    void invoke("open_public_resource", { url: NETFLIX_URL, label: "Netflix" })
+      .then(() => showNotice("Netflix opened in the system browser. Embedded playback is not supported."))
+      .catch((error) => showNotice(String(error)));
+  }
   function pushVoiceTurn(role: string, text: string): void {
     voiceConversation = [...voiceConversation.slice(-7), { role, text: text.slice(0, 500) }];
   }
@@ -632,6 +767,7 @@
     const requestId = ++audioRequestId;
     micError = ""; voiceTranscript = ""; voiceResult = "";
     voice().interrupt();
+    duckMediaForSpeech();
     intentStep = "listening"; presence = "listening"; audioPhase = 0; micLevel = 0;
     try {
       const recorder = new VoiceRecorder({ onLevel: (level) => { micLevel = level; audioPhase += 0.003 + level * 0.11; } });
@@ -692,6 +828,8 @@
       resources: state.resources.slice(0, 120).map((item) => ({ id: item.id, goalId: item.goalId, label: item.label, url: item.url })),
       approvals: [...pendingRuntimeApprovals.map((item) => ({ id: `${item.runId}:${item.callId}`, goalId: item.goalId, action: item.tool })), ...(state.approval && state.approval.status === "pending" ? [{ id: state.approval.id, goalId: state.approval.goalId, action: state.approval.action }] : [])].slice(0, 20),
       cases: runtimeGuardCases.slice(0, 40).map((item) => ({ id: item.id, goal_title: item.goal_title, status: item.status, signal: item.signal })),
+      accounts: connectedAccounts.slice(0, 20).map((item) => ({ id: `${item.provider}:${item.email}`, provider: item.provider, email: item.email, status: item.status })),
+      messages: [...(mailSelected ? [mailSelected] : []), ...mailMessages].slice(0, 40).map((item) => ({ id: item.id, subject: item.subject, from: item.from ?? "" })),
       selection: { ...(selected ? { kind: selected.kind, id: selected.id } : {}), panel },
       recent_events: state.events.slice(0, 8).map(eventLabel),
       conversation: voiceConversation.slice(-8),
@@ -725,7 +863,69 @@
       approval: id ? pendingRuntimeApprovals.find((item) => `${item.runId}:${item.callId}` === id) : undefined,
       localApproval: id && state.approval?.id === id && state.approval.status === "pending" ? state.approval : undefined,
       guardCase: id ? runtimeGuardCases.find((item) => item.id === id) : undefined,
+      account: id ? connectedAccounts.find((item) => item.email === id || `${item.provider}:${item.email}` === id) : undefined,
+      message: id ? [...(mailSelected ? [mailSelected] : []), ...mailMessages].find((item) => item.id === id) : undefined,
     };
+  }
+
+  function resolveVoiceAccount(intent: VoiceIntent) {
+    const provider = typeof intent.args.provider === "string" ? intent.args.provider : undefined;
+    const email = typeof intent.args.email === "string" ? intent.args.email : undefined;
+    return resolveAccount(connectedAccounts, { provider, email });
+  }
+
+  function selectedMailAccount(): ConnectedAccount | undefined {
+    if (mailAccountKey) {
+      const ref = parseAccountKey(mailAccountKey);
+      const hit = resolveAccount(connectedAccounts, ref);
+      if (hit.kind === "resolved") return hit.account;
+    }
+    if (connectedAccounts.length === 1) return connectedAccounts[0];
+    return undefined;
+  }
+
+  async function loadMail(account: ConnectedAccount | undefined, query?: string): Promise<void> {
+    mailError = "";
+    if (!account) {
+      mailMessages = []; mailSelected = null;
+      mailError = connectedAccounts.length ? "Pick one account above to read its mail." : "No service account is connected. Nothing is shown without a connection.";
+      return;
+    }
+    mailLoading = true;
+    try {
+      const result = await invoke<{ messages: MailMessage[] }>("runtime_mail_list", {
+        provider: account.provider, email: account.email,
+        ...(query?.trim() ? { query: query.trim() } : {}), limit: 10,
+      });
+      mailMessages = result.messages;
+      mailSelected = null;
+      mailAccountKey = accountKey(account);
+    } catch (error) {
+      mailMessages = []; mailSelected = null;
+      mailError = error instanceof Error ? error.message : String(error);
+    } finally { mailLoading = false; }
+  }
+
+  async function readMailMessage(account: ConnectedAccount, messageId: string): Promise<void> {
+    mailError = "";
+    mailLoading = true;
+    try {
+      mailSelected = await invoke<MailMessage>("runtime_mail_get", { messageId, provider: account.provider, email: account.email });
+      mailAccountKey = accountKey(account);
+    } catch (error) {
+      mailError = error instanceof Error ? error.message : String(error);
+    } finally { mailLoading = false; }
+  }
+
+  function decideEmailSend(approved: boolean) {
+    const draft = pendingEmailSend;
+    pendingEmailSend = null;
+    closePanel(); presence = "resting";
+    if (approved && draft) {
+      showNotice(`Approval recorded for the draft to ${draft.to}. Nothing was sent: the mail connector is read-only.`);
+    } else {
+      showNotice("Email send declined. No draft was sent.");
+    }
   }
 
   function describeGoalStatus(goal: Goal): string {
@@ -837,6 +1037,7 @@
         return "I found no investigation or agent problem to explain.";
       }
       case "REQUEST_APPROVAL_DETAILS": {
+        if (pendingEmailSend) { panel = "approval"; return `An email to ${pendingEmailSend.to} is waiting for your approval. I opened the request — confirm it in the panel.`; }
         const pending = target.approval ?? (pendingRuntimeApprovals.length === 1 ? pendingRuntimeApprovals[0] : undefined);
         if (pending) {
           const goal = goals.find((item) => item.id === pending.goalId);
@@ -850,6 +1051,7 @@
       case "DENY_ACTION": {
         const pending = target.approval ?? (pendingRuntimeApprovals.length === 1 ? pendingRuntimeApprovals[0] : undefined);
         const verb = intent.type === "APPROVE_ACTION" ? "approve" : "deny";
+        if (pendingEmailSend) { panel = "approval"; return `I opened the email send request. To stay safe I never ${verb} by voice alone, so confirm it in the panel.`; }
         if (pending) {
           const goal = goals.find((item) => item.id === pending.goalId);
           if (goal) { selected = { kind: "goal", id: goal.id }; panel = "goal"; }
@@ -857,6 +1059,126 @@
         }
         if (state.approval?.status === "pending") { panel = "approval"; return `I opened the payment approval. Confirm ${verb} in the panel.`; }
         return "Nothing is waiting for approval.";
+      }
+      case "OPEN_MEDIA": {
+        const target = resolveMediaTarget(argText("target"));
+        if (!target) return "Which media should I open: local video, YouTube, or Netflix?";
+        if (target === "youtube") {
+          const videoId = argText("video_id");
+          if (videoId) youtubeVideoId = videoId;
+          if (!youtubeVideoId.trim()) return "Which YouTube video? Give me its 11-character video id.";
+        }
+        return openMediaSurface(target, { videoId: youtubeVideoId });
+      }
+      case "PAUSE_MEDIA":
+        return pauseMedia(resolveMediaTarget(argText("target")));
+      case "RESUME_MEDIA":
+        return resumeMedia(resolveMediaTarget(argText("target")));
+      case "CLOSE_MEDIA":
+        return closeMedia(resolveMediaTarget(argText("target")));
+      case "CONNECT_ACCOUNT": {
+        const provider = argText("provider")?.toLowerCase();
+        if (provider !== "gmail" && provider !== "outlook" && provider !== "fake-mail") {
+          panel = "providers"; currentMenu = "providers";
+          return "Which service should I connect: Gmail, Outlook, or the fake test mailbox? I opened the services panel.";
+        }
+        if (provider === "fake-mail") {
+          await connectService("fake-mail");
+          panel = "providers"; currentMenu = "providers";
+          return "Fake test mailbox connected. Its fixtures are labeled and never live mail.";
+        }
+        panel = "providers"; currentMenu = "providers";
+        return `To stay safe I never sign in by voice alone, so I opened the services panel. Choose Connect ${provider === "gmail" ? "Gmail" : "Outlook"} there.`;
+      }
+      case "DISCONNECT_ACCOUNT":
+      case "REVOKE_AGENT_SERVICE_ACCESS": {
+        const named = target.account;
+        const resolved = named ? { kind: "resolved" as const, account: named } : resolveVoiceAccount(intent);
+        if (resolved.kind === "ambiguous") {
+          panel = "providers"; currentMenu = "providers";
+          return `That matches ${resolved.candidates.length} accounts. I opened the services panel — pick the one to disconnect.`;
+        }
+        const account = resolved.kind === "resolved" ? resolved.account : (connectedAccounts.length === 1 ? connectedAccounts[0] : undefined);
+        if (!account) {
+          panel = "providers"; currentMenu = "providers";
+          return connectedAccounts.length ? "Which account should I disconnect?" : "No service account is connected.";
+        }
+        await disconnectService(account);
+        panel = "providers"; currentMenu = "providers";
+        return intent.type === "REVOKE_AGENT_SERVICE_ACCESS"
+          ? `${account.email} is disconnected. Agents can no longer read it, and its credentials were deleted from the system keychain.`
+          : `${account.email} disconnected.`;
+      }
+      case "LIST_CONNECTED_ACCOUNTS":
+      case "OPEN_SERVICE":
+      case "SHOW_SERVICE_PERMISSIONS": {
+        panel = "providers"; currentMenu = "providers";
+        if (!connectedAccounts.length) return "No service account is connected. I opened the services panel to connect one.";
+        const detail = connectedAccounts.map((item) => `${item.email} (${item.provider}, ${item.status})`).join("; ");
+        if (intent.type === "SHOW_SERVICE_PERMISSIONS") {
+          const scopes = connectedAccounts.map((item) => `${item.email}: ${item.scopes.join(", ")}`).join("; ");
+          return `Connected accounts: ${detail}. Granted scopes: ${scopes}. Tokens stay in the system keychain.`;
+        }
+        return `Connected accounts: ${detail}. I opened the services panel.`;
+      }
+      case "SEARCH_EMAIL": {
+        const query = argText("query");
+        if (!query) return "What should I search your mail for?";
+        const named = target.account;
+        const resolved = named ? { kind: "resolved" as const, account: named } : resolveVoiceAccount(intent);
+        if (resolved.kind === "ambiguous") {
+          panel = "providers"; currentMenu = "providers";
+          return "That matches several accounts. I opened the services panel — pick one, then search again.";
+        }
+        const account = resolved.kind === "resolved" ? resolved.account : (connectedAccounts.length === 1 ? connectedAccounts[0] : undefined);
+        if (!account) {
+          panel = "providers"; currentMenu = "providers";
+          return connectedAccounts.length ? "Which account should I search?" : "No service account is connected, so there is nothing to search.";
+        }
+        mailQuery = query;
+        await loadMail(account, query);
+        panel = "providers"; currentMenu = "providers";
+        if (mailError) return mailError;
+        return mailMessages.length ? `Found ${mailMessages.length} message${mailMessages.length === 1 ? "" : "s"} in ${account.email}. I opened them in the services panel.` : `No messages matched in ${account.email}.`;
+      }
+      case "READ_EMAIL": {
+        const named = target.account;
+        const resolved = named ? { kind: "resolved" as const, account: named } : resolveVoiceAccount(intent);
+        if (resolved.kind === "ambiguous") {
+          panel = "providers"; currentMenu = "providers";
+          return "That matches several accounts. I opened the services panel — pick one, then read again.";
+        }
+        const account = resolved.kind === "resolved" ? resolved.account : selectedMailAccount();
+        if (!account) {
+          panel = "providers"; currentMenu = "providers";
+          return connectedAccounts.length ? "Which account should I read?" : "No service account is connected, so there is nothing to read.";
+        }
+        const messageId = target.message?.id ?? argText("message_id");
+        if (messageId) {
+          await readMailMessage(account, messageId);
+          panel = "providers"; currentMenu = "providers";
+          if (mailError) return mailError;
+          return mailSelected ? `Opened: ${mailSelected.subject}. ${mailSelected.snippet ?? ""}` : "I could not open that message.";
+        }
+        await loadMail(account);
+        panel = "providers"; currentMenu = "providers";
+        if (mailError) return mailError;
+        return mailMessages.length ? `Showing ${mailMessages.length} message${mailMessages.length === 1 ? "" : "s"} in ${account.email}.` : `No messages in ${account.email}.`;
+      }
+      case "PREPARE_EMAIL_DRAFT": {
+        const to = argText("to");
+        if (!to) return "Who should the draft be addressed to?";
+        emailDraft = { to, subject: argText("subject") ?? "", body: argText("body") ?? "", accountEmail: selectedMailAccount()?.email };
+        panel = "providers"; currentMenu = "providers";
+        return `Draft prepared for ${to}. I did not send it — review it in the services panel.`;
+      }
+      case "REQUEST_SEND_EMAIL": {
+        const to = argText("to") ?? emailDraft?.to;
+        if (!to) return "There is no draft to send. Tell me who it is for first.";
+        pendingEmailSend = { to, subject: argText("subject") ?? emailDraft?.subject ?? "", body: argText("body") ?? emailDraft?.body ?? "", accountEmail: emailDraft?.accountEmail ?? selectedMailAccount()?.email };
+        emailDraft = pendingEmailSend;
+        panel = "approval";
+        return `I opened the send request for your review. To stay safe I never send by voice alone, so confirm it in the panel.`;
       }
       case "CHANGE_APPEARANCE": {
         const theme = argText("theme");
@@ -931,7 +1253,7 @@
 </script>
 
 <svelte:head><title>KeplerV · Intent Space</title><meta name="description" content="An experimental intent-native browser." /></svelte:head>
-<svelte:window onkeydown={(event) => { if (event.key === "Escape" && panel) closePanel(); }} />
+<svelte:window onkeydown={(event) => { if (event.key === "Escape") { if (panel) closePanel(); else if (mediaView) closeMedia(); } }} />
 
 <main class="app-shell" class:panel-open={panel !== null}>
   <header class="topbar">
@@ -978,7 +1300,7 @@
         <div class="graph-legend"><span><i class="legend-goal"></i> GOAL</span><span><i class="legend-agent"></i> AGENT</span><span><i class="legend-resource"></i> RESOURCE</span></div>
       </div>
 
-      <div class="goal-ribbon"><div class="ribbon-title"><span class="ribbon-index">GOAL</span><b>{activeGoal?.title ?? "No goal selected"}</b><small>{activeGoal?.description}</small></div><div class="ribbon-progress"><div><span>DONE</span><b>{activeGoal?.progress ?? 0}%</b></div><span class="progress-track"><i style={`width:${activeGoal?.progress ?? 0}%`}></i></span></div><div class="ribbon-agents"><span>HELPERS</span><b>{goalAgents.length.toString().padStart(2, "0")}</b></div><div class="ribbon-buttons"><button onclick={assignAgent}>＋ Add helper</button><button onclick={() => panel = "resource"}>↗ Add link</button><button onclick={() => panel = "timeline"}>Recent activity ↗</button></div></div>
+      <div class="goal-ribbon"><div class="ribbon-title"><span class="ribbon-index">GOAL</span><b>{activeGoal?.title ?? "No goal selected"}</b><small>{activeGoal?.description}</small></div><div class="ribbon-progress"><div><span>DONE</span><b>{activeGoal?.progress ?? 0}%</b></div><span class="progress-track"><i style={`width:${activeGoal?.progress ?? 0}%`}></i></span></div><div class="ribbon-agents"><span>HELPERS</span><b>{goalAgents.length.toString().padStart(2, "0")}</b></div><div class="ribbon-buttons"><button onclick={assignAgent}>＋ Add helper</button><button onclick={() => panel = "resource"}>↗ Add link</button><button onclick={() => openMediaSurface("local-video")}>▶ Media</button><button onclick={() => panel = "timeline"}>Recent activity ↗</button></div></div>
     </section>
 
   </div>
@@ -989,6 +1311,23 @@
       <header class="resource-toolbar"><button class="resource-back" onclick={() => { resourceView = false; }}>← <span>Back to workspace</span></button><div class="resource-address"><b>{activeResource.label}</b><span>🔒 {new URL(activeResource.url).hostname}</span></div><button class="resource-open-external" onclick={() => invoke("open_public_resource", { url: activeResource.url, label: activeResource.label }).then(() => showNotice("Opened link in a separate window.")).catch((error) => showNotice(String(error)))}>Open separately ↗</button></header>
       <iframe class="resource-frame" src={activeResource.url} title={activeResource.label} referrerpolicy="no-referrer"></iframe>
       <div class="resource-frame-note">If this site blocks display inside KeplerV, choose <b>Open separately</b>.</div>
+    </section>
+  {/if}
+
+  {#if mediaView && mediaSurface}
+    <section class="media-immersive" aria-label={`Media surface: ${surfaceLabel(mediaSurface)}`}>
+      <header class="media-toolbar"><button class="media-back" onclick={() => closeMedia()}>← <span>Back to workspace</span></button><div class="media-address"><b>{surfaceLabel(mediaSurface)}</b><span>ONE AUDIBLE SURFACE · VOICE DUCKS MEDIA</span></div><div class="media-switch"><button class:media-on={mediaSurface === "local-video"} onclick={() => openMediaSurface("local-video")}>Local</button><button class:media-on={mediaSurface === "youtube"} onclick={() => openMediaSurface("youtube")}>YouTube</button><button class:media-on={mediaSurface === "netflix-fallback"} onclick={() => openMediaSurface("netflix-fallback")}>Netflix</button></div></header>
+      {#if mediaSurface === "local-video"}
+        <video class="media-video" bind:this={localVideoEl} src={LOCAL_DEMO_VIDEO_URL} controls playsinline preload="metadata" title="KeplerV local demo fixture"><track kind="captions" src="/media/keplerv-demo.en.vtt" srclang="en" label="English" /></video>
+        <div class="media-frame-note"><span>LOCAL FIXTURE · generated test pattern, no licensed content</span><span class="media-transport"><button onclick={() => pauseMedia()}>Pause</button><button onclick={() => resumeMedia()}>Resume</button><button onclick={() => closeMedia()}>Close</button></span></div>
+      {:else if mediaSurface === "youtube"}
+        {#if youtubeSrc}<iframe class="media-frame" bind:this={youtubeFrameEl} src={youtubeSrc} title="YouTube embed" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>
+        {:else}<div class="media-prompt"><form onsubmit={(event) => { event.preventDefault(); openMediaSurface("youtube"); }}><label>YOUTUBE VIDEO ID<input bind:value={youtubeVideoId} maxlength="11" placeholder="11-character id from the video URL" /></label><button class="object-primary" type="submit">Embed with the official player</button></form><small>Official youtube-nocookie iframe player only. KeplerV never fetches or rehosts video.</small></div>{/if}
+        <div class="media-frame-note"><span>YOUTUBE EMBED · official player · capability-checked</span><span class="media-transport"><button onclick={() => pauseMedia()}>Pause</button><button onclick={() => resumeMedia()}>Resume</button><button onclick={() => closeMedia()}>Close</button></span></div>
+      {:else}
+        <div class="media-prompt"><p><b>Embedded Netflix is not supported in KeplerV.</b></p><p>Netflix uses DRM that cannot play inside this app. No workaround is attempted. Use the supported option below.</p><button class="object-primary" onclick={openNetflixExternally}>{NETFLIX_FALLBACK_LABEL} ↗</button></div>
+        <div class="media-frame-note"><span>NETFLIX · external browser only · embedded playback never claimed</span><span class="media-transport"><button onclick={() => closeMedia()}>Close</button></span></div>
+      {/if}
     </section>
   {/if}
 
@@ -1036,6 +1375,21 @@
       <section class="provider-connect-card"><div class="provider-card-top"><span class="provider-avatar">✦</span><div><b>Meta Muse</b><small>Used by KeplerV research agents</small></div><span class="connection-state">{metaConnected ? activeProvider === "meta" ? "CONNECTED · ACTIVE" : "CONNECTED" : "NOT CONNECTED"}</span></div>{#if metaConnected}<p class="provider-connect-note">Connected securely on this device.{activeProvider === "meta" ? " Research is using Meta Muse." : ""}</p><div class="provider-connect-actions">{#if activeProvider !== "meta"}<button class="provider-default" onclick={() => activateProviderConnection("meta")}>Use for research</button>{/if}<button class="provider-default" onclick={() => removeCredential("meta")}>Disconnect</button></div>{:else}<form class="provider-form" onsubmit={saveMetaCredential}><label>API KEY<input bind:value={metaApiKey} type="password" autocomplete="off" placeholder="Paste your Meta API key" required /></label><button class="object-primary" type="submit" disabled={savingCredential}>{savingCredential ? "Connecting…" : "Connect Meta Muse"}</button></form><small class="provider-security-note">The key is sent to KeplerV’s native runtime and saved in your system keychain. It is not stored with your workspace data.</small>{/if}</section>
       <section class="provider-connect-card"><div class="provider-card-top"><span class="provider-avatar">◉</span><div><b>ChatGPT</b><small>Sign in with your ChatGPT account</small></div><span class="connection-state">{connectingChatgpt ? "WAITING FOR SIGN-IN" : chatgptConnected ? chatgptSharing ? "PLAN CONNECTED" : "ACCOUNT CONNECTED" : "NOT CONNECTED"}</span></div>{#if connectingChatgpt}<div class="chatgpt-progress" role="status" aria-live="polite"><span class="chatgpt-progress-dot"></span><div><b>Finish sign-in in KeplerV</b><small>Your sign-in page is open in a KeplerV window. Approve access there; this workspace will finish connecting automatically.</small></div></div>{/if}{#if chatgptConnected}<p class="provider-connect-note">{chatgptEmail || "ChatGPT account"}{chatgptSharing ? " · ChatGPT plan usage is authorized." : " · Plan usage was not authorized."}</p><div class="provider-connect-actions">{#if chatgptSharing && activeProvider !== "chatgpt"}<button class="provider-default" onclick={() => activateProviderConnection("chatgpt")}>Use for research</button>{/if}<button class="provider-default" onclick={connectChatGPT} disabled={connectingChatgpt}>{connectingChatgpt ? "Opening sign-in…" : "Reconnect"}</button><button class="provider-default" onclick={disconnectChatGPT}>Disconnect</button></div>{:else}<p class="provider-connect-note">ChatGPT sign-in opens in a KeplerV window. Your login stays inside the app; KeplerV will confirm when account verification and setup are complete.</p><button class="object-primary" onclick={connectChatGPT} disabled={connectingChatgpt}>{connectingChatgpt ? "Waiting for ChatGPT…" : "Continue with ChatGPT"}</button>{/if}{#if chatgptConnectError}<p class="chatgpt-connect-error" role="alert">{chatgptConnectError}</p>{/if}<small class="provider-security-note">Tokens are stored in the system keychain. KeplerV requests access only to perform eligible model requests; it cannot read your ChatGPT conversations.</small></section>
       <section class="provider-connect-card"><div class="provider-card-top"><span class="provider-avatar">◇</span><div><b>Other model providers</b><small>OpenAI · Anthropic · Gemini · DeepSeek · Kimi · OpenRouter · Groq · Mistral</small></div><span class="connection-state">{activeProvider.toUpperCase()} · {activeModel}</span></div><form class="provider-form" onsubmit={connectConfiguredProvider}><label>PROVIDER<select value={connectProviderId} onchange={(event) => chooseConnectProvider((event.currentTarget as HTMLSelectElement).value)}><option value="openai">OpenAI API</option><option value="anthropic">Anthropic</option><option value="google">Google Gemini</option><option value="deepseek">DeepSeek</option><option value="kimi">Kimi / Moonshot</option><option value="openrouter">OpenRouter</option><option value="groq">Groq</option><option value="mistral">Mistral</option><option value="openai-compatible">Other OpenAI-compatible endpoint</option><option value="local-ollama">Ollama · Local</option><option value="local-lmstudio">LM Studio · Local</option><option value="local-openai-compatible">Other OpenAI-compatible local server</option></select></label><label>ENDPOINT<input bind:value={connectEndpoint} type="url" required /></label><label>MODEL<input bind:value={connectModel} placeholder="Leave blank to select the first available model" /></label>{#if !connectProviderId.startsWith("local-")}<label>API KEY<input bind:value={connectSecret} type="password" autocomplete="off" placeholder={connectedCredentials.includes(connectProviderId) ? "Leave blank to use the saved key" : "Provider API key"} required={!connectedCredentials.includes(connectProviderId)} /></label>{:else}<p class="provider-connect-note">Make sure this local model server is running. KeplerV checks the endpoint and model before saving.</p>{/if}<button class="object-primary" type="submit" disabled={connectingProvider}>{connectingProvider ? "Checking connection…" : "Check and connect"}</button></form><small class="provider-security-note">KeplerV checks that the endpoint is reachable and the model is available. API keys go to the system keychain; endpoint and model settings stay on this device.</small></section>
+      <section class="provider-connect-card"><div class="provider-card-top"><span class="provider-avatar">✉</span><div><b>Connected services</b><small>Gmail · Outlook · Fake Mail test fixture</small></div><span class="connection-state">{connectedAccounts.length ? `${connectedAccounts.length} CONNECTED` : "NONE CONNECTED"}</span></div>
+        {#if connectedAccounts.length}<div class="provider-saved-list">{#each connectedAccounts as account}<article><div><b>{account.email}</b><small>{account.provider} · {account.status.toUpperCase()} · {account.scopes.length} scope{account.scopes.length === 1 ? "" : "s"}</small></div><div><button class="provider-default" disabled={connectingService !== null} onclick={() => disconnectService(account)}>Disconnect</button></div></article>{/each}</div>
+        {:else}<p class="provider-connect-note">No service accounts connected. Connect one to let research read mail with your approval.</p>{/if}
+        <div class="provider-connect-actions"><button class="provider-default" disabled={connectingService !== null} onclick={() => connectService("gmail")}>{connectingService === "gmail" ? "Waiting for sign-in…" : "Connect Gmail"}</button><button class="provider-default" disabled={connectingService !== null} onclick={() => connectService("outlook")}>{connectingService === "outlook" ? "Waiting for sign-in…" : "Connect Outlook"}</button><button class="provider-default" disabled={connectingService !== null} onclick={() => connectService("fake-mail")}>{connectingService === "fake-mail" ? "Connecting…" : "Connect Fake Mail (test fixture)"}</button></div>
+        {#if serviceError}<p class="chatgpt-connect-error" role="alert">{serviceError}</p>{/if}
+        <small class="provider-security-note">OAuth tokens are stored in the system keychain, separate from model API keys. Fake Mail is a clearly-labeled local fixture — never live mail.</small></section>
+      <section class="provider-connect-card"><div class="provider-card-top"><span class="provider-avatar">✉</span><div><b>Mail</b><small>Read connected accounts · sending needs approval</small></div><span class="connection-state">{mailLoading ? "LOADING" : mailMessages.length ? `${mailMessages.length} SHOWN` : "NOTHING LOADED"}</span></div>
+        {#if connectedAccounts.length}
+          <form class="provider-form" onsubmit={(event) => { event.preventDefault(); void loadMail(selectedMailAccount(), mailQuery); }}><label>ACCOUNT<select bind:value={mailAccountKey}><option value="">Pick an account…</option>{#each connectedAccounts as account}<option value={accountKey(account)}>{account.email} ({account.provider})</option>{/each}</select></label><label>SEARCH MAIL<input bind:value={mailQuery} placeholder="enrollment, atlas…" /></label><button class="object-primary" type="submit" disabled={mailLoading}>{mailLoading ? "Loading…" : "Load mail"}</button></form>
+          {#if mailError}<p class="chatgpt-connect-error" role="alert">{mailError}</p>{/if}
+          {#if mailMessages.length}<div class="provider-saved-list">{#each mailMessages as message}<article><div><b>{message.subject}</b><small>{message.from ?? ""}{message.date ? ` · ${message.date}` : ""}{message.fake ? " · FAKE FIXTURE" : ""}</small></div><div><button class="provider-default" onclick={() => { const account = selectedMailAccount(); if (account) void readMailMessage(account, message.id); }}>Read</button></div></article>{/each}</div>{/if}
+          {#if mailSelected}<article class="mail-reading"><div class="inspector-block"><span>{mailSelected.fake ? (mailSelected.label ?? "FAKE FIXTURE") : `FROM ${mailSelected.from ?? "unknown"}`}</span><b>{mailSelected.subject}</b><small>{mailSelected.date ?? ""}</small><p>{mailSelected.body || mailSelected.snippet || "No preview available."}</p></div><button class="secondary-wide" onclick={() => mailSelected = null}>Close message</button></article>{/if}
+        {:else}<p class="provider-connect-note">Connect an account above first. Nothing is shown without a connection.</p>{/if}
+        {#if emailDraft}<article class="mail-draft"><div class="inspector-block"><span>UNSENT DRAFT</span><b>To: {emailDraft.to}</b><small>{emailDraft.subject || "(no subject)"}{emailDraft.accountEmail ? ` · via ${emailDraft.accountEmail}` : ""}</small><p>{emailDraft.body || "(empty body)"}</p></div><div class="provider-connect-actions"><button class="provider-default" onclick={() => { pendingEmailSend = emailDraft; panel = "approval"; }}>Request approval to send</button><button class="provider-default" onclick={() => emailDraft = null}>Discard draft</button></div><small class="provider-security-note">Drafts are never sent automatically. Sending needs your explicit approval, and the mail connector is read-only.</small></article>{/if}
+        <small class="provider-security-note">Agent browsers run in isolated sessions with no shared cookies; your sign-in stays in the app window.</small></section>
       {#if connectedCredentials.some((provider) => !["meta", "chatgpt"].includes(provider))}<section class="provider-saved-list"><h3>Connected providers</h3>{#each connectedCredentials.filter((provider) => !["meta", "chatgpt"].includes(provider)) as provider}<article><div><b>{provider === "local-ollama" ? "Ollama" : provider === "local-lmstudio" ? "LM Studio" : provider === "local-openai-compatible" ? "Local model" : provider === "openai-compatible" ? "Custom OpenAI-compatible" : provider[0].toUpperCase() + provider.slice(1)}</b><small>{activeProvider === provider ? `Active · ${activeModel}` : "Connected on this device"}</small></div><div><button class="provider-default" disabled={activeProvider === provider} onclick={() => activateProviderConnection(provider)}>{activeProvider === provider ? "Active" : "Use for research"}</button><button class="provider-remove" aria-label={`Disconnect ${provider}`} onclick={() => removeCredential(provider)}>×</button></div></article>{/each}</section>{/if}
       <p class="provider-footnote">You can connect several providers here. The active provider and model are shown above; connecting another provider switches research to it.</p>
     {:else if panel === "create_goal"}<form class="context-form" onsubmit={submitGoal}><label>WHAT WOULD YOU LIKE TO DO?<textarea class="intent-entry" bind:value={newDescription} rows="12" placeholder="Describe what you want KeplerV to help with." required></textarea></label><button class="object-primary" type="submit">＋ Add goal</button><p class="subtle">Your goal appears on the graph. Open it to start web research with Muse.</p></form>
@@ -1058,7 +1412,7 @@
     {:else if panel === "timeline"}<div class="timeline-summary"><span>{realActivityEvents.length} RECORDED EVENTS</span><b>Agent activity</b><small>Events are recorded by the local runtime as agents work.</small></div>{#if realActivityEvents.length}<div class="timeline-list">{#each realActivityEvents as event}<article class="timeline-event"><span class="timeline-marker"></span><div><b>{eventLabel(event)}</b><small>{eventTypeLabel(event)} · {agents.find((agent) => agent.id === event.agentId)?.name ?? "KeplerV"}</small><time>{new Date(event.timestamp).toLocaleString()}</time></div></article>{/each}</div>{:else}<p class="subtle">No agent activity yet. Start research from a goal to see its events here.</p>{/if}
     {:else if panel === "resource"}<form class="context-form" onsubmit={submitResource}><p class="subtle">The link opens inside KeplerV and stays connected to this goal. Some websites block embedded viewing; you can open supported links separately.</p><label>LINK NAME<input bind:value={resourceLabel} maxlength="80" /></label><label>CHOOSE A LINK<select bind:value={resourceUrl}>{#each demoResources as resource}<option value={resource.url}>{resource.label}</option>{/each}</select></label><label>OR ENTER A PUBLIC HTTPS ADDRESS<input bind:value={resourceUrl} type="url" placeholder="https://www.nps.gov/…" /></label><button class="object-primary" type="submit">Open inside KeplerV ↗</button></form>
     {:else if panel === "resource_detail" && activeResource}<div class="resource-inspector"><span class="resource-inspector-icon">↗</span><h3>{activeResource.label}</h3><p>This link is associated with <b>{goals.find((goal) => goal.id === activeResource.goalId)?.title}</b>.</p><div class="inspector-block"><span>LINK ADDRESS</span><b>{new URL(activeResource.url).hostname}</b><small>{activeResource.url}</small></div><button class="object-primary" onclick={() => { panel = null; resourceView = true; }}>Open inside KeplerV ↗</button><button class="secondary-wide" onclick={() => invoke("open_public_resource", { url: activeResource.url, label: activeResource.label }).then(() => showNotice("Opened link in a separate window.")).catch((error) => showNotice(String(error)))}>Open separately</button><button class="secondary-wide" onclick={() => panel = null}>Close details</button></div>
-    {:else if panel === "approval" && state.approval}<div class="approval-card"><span>HUMAN APPROVAL REQUIRED</span><h3>Tuition payment request</h3><p>A finance agent requested a tuition transfer. Review this request before recording an approval decision.</p><div class="approval-amount">$750 <small>REQUEST AMOUNT</small></div><div class="approval-detail"><span>AGENT</span><b>{agents.find((agent) => agent.id === state.approval?.agentId)?.name}</b></div><div class="approval-detail"><span>AIP</span><b>REQUIRE APPROVAL</b></div><div class="approval-detail"><span>REQUEST</span><b>{state.approval.action}</b></div><div class="panel-actions approval-actions"><button class="object-primary" onclick={() => decideApproval(true)} disabled={state.approval.status !== "pending"}>Approve request</button><button class="danger-button" onclick={() => decideApproval(false)} disabled={state.approval.status !== "pending"}>Deny request</button><button class="secondary-wide" onclick={() => { const agent = agents.find((item) => item.id === state.approval?.agentId); if (agent) commit(transitionAgent(state, agent.id, "pause")); closePanel(); }}>Pause agent</button></div><p class="subtle">Approval records a decision in KeplerV; no payment is sent.</p></div>{/if}
+    {:else if panel === "approval" && (pendingEmailSend || state.approval)}{#if pendingEmailSend}<div class="approval-card"><span>HUMAN APPROVAL REQUIRED</span><h3>Email send request</h3><p>KeplerV prepared an email draft. Review it before recording an approval decision. Nothing is sent automatically.</p><div class="approval-detail"><span>TO</span><b>{pendingEmailSend.to}</b></div><div class="approval-detail"><span>SUBJECT</span><b>{pendingEmailSend.subject || "(no subject)"}</b></div><div class="approval-detail"><span>VIA</span><b>{pendingEmailSend.accountEmail ?? "default account"}</b></div><div class="approval-detail"><span>BODY</span><b>{pendingEmailSend.body.slice(0, 280) || "(empty body)"}</b></div><div class="approval-detail"><span>AIP</span><b>REQUIRE APPROVAL</b></div><div class="panel-actions approval-actions"><button class="object-primary" onclick={() => decideEmailSend(true)}>Approve request</button><button class="danger-button" onclick={() => decideEmailSend(false)}>Deny request</button></div><p class="subtle">Approval records a decision in KeplerV; the mail connector is read-only, so no email is transmitted.</p></div>{:else if state.approval}<div class="approval-card"><span>HUMAN APPROVAL REQUIRED</span><h3>Tuition payment request</h3><p>A finance agent requested a tuition transfer. Review this request before recording an approval decision.</p><div class="approval-amount">$750 <small>REQUEST AMOUNT</small></div><div class="approval-detail"><span>AGENT</span><b>{agents.find((agent) => agent.id === state.approval?.agentId)?.name}</b></div><div class="approval-detail"><span>AIP</span><b>REQUIRE APPROVAL</b></div><div class="approval-detail"><span>REQUEST</span><b>{state.approval.action}</b></div><div class="panel-actions approval-actions"><button class="object-primary" onclick={() => decideApproval(true)} disabled={state.approval.status !== "pending"}>Approve request</button><button class="danger-button" onclick={() => decideApproval(false)} disabled={state.approval.status !== "pending"}>Deny request</button><button class="secondary-wide" onclick={() => { const agent = agents.find((item) => item.id === state.approval?.agentId); if (agent) commit(transitionAgent(state, agent.id, "pause")); closePanel(); }}>Pause agent</button></div><p class="subtle">Approval records a decision in KeplerV; no payment is sent.</p></div>{/if}{/if}
   </div>{/if}
 
   {#if notice}<div class="toast" role="status">{notice}<button aria-label="Dismiss notification" onclick={() => notice = ""}>×</button></div>{/if}

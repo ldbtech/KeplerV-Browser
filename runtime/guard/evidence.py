@@ -10,6 +10,12 @@ from runtime.store import RuntimeStore
 
 _SECRET_KEYS = ("password", "secret", "token", "authorization", "cookie", "credential", "api_key", "apikey")
 
+#: Minimal-evidence policy (M8): full message bodies are withheld from Guard
+#: bundles by default; investigators work from snippets unless the local user
+#: explicitly expands a message.
+_BODY_KEYS = frozenset({"body", "message_body", "email_body", "mail_body", "message_text"})
+_BODY_SNIPPET_CHARS = 160
+
 
 def _safe_url(value: str) -> str:
     try:
@@ -35,6 +41,8 @@ def _sanitize(value: Any, key: str = "") -> Any:
     if isinstance(value, str):
         if lowered in {"url", "source_url", "current_url"}:
             return _safe_url(value)
+        if lowered in _BODY_KEYS and len(value) > _BODY_SNIPPET_CHARS:
+            return value[:_BODY_SNIPPET_CHARS] + "… [truncated: full body withheld by minimal-evidence policy]"
         return value[:1200]
     if value is None or isinstance(value, (bool, int, float)):
         return value
@@ -169,5 +177,6 @@ class GuardEvidenceService:
                 "Agent conversation transcripts are excluded from this retrieval bundle.",
                 "A denied request records an attempt; it does not establish successful access.",
                 "Model statements are interpretations and must be checked against event evidence.",
+                "Full message bodies are withheld by default (minimal-evidence policy); snippets only.",
             ],
         }

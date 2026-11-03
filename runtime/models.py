@@ -55,6 +55,20 @@ class ControlRequest(StrictModel):
     call_id: str | None = Field(default=None, max_length=128)
 
 
+class MailAccountRef(StrictModel):
+    provider: str | None = Field(default=None, max_length=64)
+    email: str | None = Field(default=None, max_length=256)
+
+
+class MailListQuery(MailAccountRef):
+    query: str | None = Field(default=None, max_length=500)
+    limit: int = Field(default=10, ge=1, le=25)
+
+
+class MailReadQuery(MailAccountRef):
+    pass
+
+
 class RuntimeEvent(BaseModel):
     id: str
     sequence: int

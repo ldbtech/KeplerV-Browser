@@ -6,12 +6,14 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 
-from runtime.models import ControlRequest, RunRequest
+from runtime.models import ControlRequest, MailListQuery, MailReadQuery, RunRequest
 from runtime.guard.schemas import GuardContainmentRequest, GuardTransitionRequest
 from runtime.guard.evidence import GuardEvidenceService
 from runtime.guard.detective import GuardInvestigationError
 from runtime.guard.interrogation import GuardInterviewError
 from runtime.scheduler import RuntimeService
+from runtime.connectors.base import AccountRef, AmbiguousAccountError, MailNotConnectedError, resolve_account
+from runtime.services.registry import STATUS_CONNECTED
 from runtime.voice.transcribe import MetaVoiceTranscriber, VoiceTranscriptionError
 from runtime.voice.intent import InterpretationError, InterpretRequest, interpret as interpret_voice_command
 from runtime.demo.university import PAGES, page_html
@@ -82,6 +84,103 @@ def create_app(service: RuntimeService | None = None) -> FastAPI:
     @app.get("/snapshot")
     async def snapshot(request: Request, after: int = Query(default=0, ge=0), _: None = Depends(authenticated)):
         return request.app.state.runtime_service.snapshot(after)
+
+    def _resolve_mail_account(service: RuntimeService, provider: str | None, email: str | None):
+        registry = service._services()
+        try:
+            resolved = resolve_account(AccountRef(provider=provider, email=email), registry.list_accounts())
+        except AmbiguousAccountError as exc:
+            raise HTTPException(status_code=409, detail={"message": str(exc), "candidates": exc.candidates})
+        except MailNotConnectedError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        meta = registry.get(resolved.provider, resolved.email)
+        if meta is None:
+            raise HTTPException(status_code=404, detail="That account is no longer connected.")
+        status = registry.effective_status(meta)
+        if status != STATUS_CONNECTED:
+            raise HTTPException(status_code=403, detail=f"Account {meta.email} is {status}. Reconnect it to read mail.")
+        try:
+            connector = service._mail_connector(resolved.provider)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return resolved, connector
+
+    @app.get("/accounts")
+    async def list_service_accounts(request: Request, _: None = Depends(authenticated)):
+        service = request.app.state.runtime_service
+        registry = service._services()
+        accounts = []
+        for account in registry.list_accounts():
+            accounts.append({
+                "provider": account.provider,
+                "email": account.email,
+                "scopes": account.scopes,
+                "expires_at": account.expires_at,
+                "status": registry.effective_status(account),
+            })
+        return {"providers": registry.providers(), "accounts": accounts}
+
+    @app.get("/mail/messages")
+    async def list_mail_messages(
+        request: Request,
+        provider: str | None = Query(default=None, max_length=64),
+        email: str | None = Query(default=None, max_length=256),
+        q: str | None = Query(default=None, max_length=500),
+        limit: int = Query(default=10, ge=1, le=25),
+        _: None = Depends(authenticated),
+    ):
+        query = MailListQuery(provider=provider, email=email, query=q, limit=limit)
+        service = request.app.state.runtime_service
+        resolved, connector = _resolve_mail_account(service, query.provider, query.email)
+        try:
+            if query.query:
+                return await connector.search(resolved, query.query, limit=query.limit)
+            return await connector.list_messages(resolved, limit=query.limit)
+        except MailNotConnectedError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (ValueError, NotImplementedError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)[:500]) from exc
+
+    @app.get("/mail/messages/{message_id}")
+    async def read_mail_message(
+        message_id: str,
+        request: Request,
+        provider: str | None = Query(default=None, max_length=64),
+        email: str | None = Query(default=None, max_length=256),
+        _: None = Depends(authenticated),
+    ):
+        query = MailReadQuery(provider=provider, email=email)
+        service = request.app.state.runtime_service
+        resolved, connector = _resolve_mail_account(service, query.provider, query.email)
+        try:
+            message = await connector.get_message(resolved, message_id[:256])
+        except MailNotConnectedError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)[:300]) from exc
+        except (ValueError, NotImplementedError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)[:500]) from exc
+        return {**message, "account": resolved.email}
+
+    @app.get("/mail/threads/{thread_id}")
+    async def read_mail_thread(
+        thread_id: str,
+        request: Request,
+        provider: str | None = Query(default=None, max_length=64),
+        email: str | None = Query(default=None, max_length=256),
+        _: None = Depends(authenticated),
+    ):
+        query = MailReadQuery(provider=provider, email=email)
+        service = request.app.state.runtime_service
+        resolved, connector = _resolve_mail_account(service, query.provider, query.email)
+        try:
+            return await connector.get_thread(resolved, thread_id[:256])
+        except MailNotConnectedError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)[:300]) from exc
+        except (ValueError, NotImplementedError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)[:500]) from exc
 
     @app.get("/guard/cases")
     async def list_guard_cases(request: Request, goal_id: str | None = None, _: None = Depends(authenticated)):

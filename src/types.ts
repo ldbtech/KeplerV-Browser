@@ -9,3 +9,17 @@ export interface Approval { id: string; goalId: string; agentId: string; action:
 export interface Resource { id: string; goalId: string; agentId: string; label: string; url: string; }
 export interface Evidence { id: string; goalId: string; agentId: string; runId: string; finding: string; sourceUrl: string; quote: string; createdAt: string; }
 export interface AppState { goals: Goal[]; agents: Agent[]; events: KeplerEvent[]; approval: Approval | null; resources: Resource[]; evidence: Evidence[]; theme: "light" | "dark" | "system"; simulationTime: number; offlineMode: boolean; }
+
+export type ServiceProviderId = "gmail" | "outlook" | "fake-mail";
+export type ServiceAccountStatus = "connected" | "expired" | "revoked";
+export interface ConnectedAccount { provider: ServiceProviderId; email: string; scopes: string[]; expires_at: number; status: ServiceAccountStatus; }
+
+export interface MailMessage { id: string; thread_id?: string; provider?: string; from?: string; to?: string[]; subject: string; date?: string; snippet?: string; body?: string; fake?: boolean; label?: string; }
+export interface MailAccountRef { provider?: string; email?: string; }
+export interface EmailDraft { to: string; subject: string; body: string; accountEmail?: string; }
+
+export type MediaSurfaceId = "local-video" | "youtube" | "netflix-fallback";
+export type MediaCommand = "OPEN" | "PAUSE" | "RESUME" | "CLOSE_MEDIA";
+export interface CapabilityResult { embeddable: boolean; reason: string; fallbackLabel?: string; }
+export interface MediaSurfaceState { active: boolean; paused: boolean; }
+export type MediaFocusState = Record<MediaSurfaceId, MediaSurfaceState>;

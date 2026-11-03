@@ -14,7 +14,15 @@ class BrowserToolError(RuntimeError):
 
 
 class BrowserController:
-    """One isolated Chromium context, scoped to user-provided and search-approved origins."""
+    """One isolated Chromium context, scoped to user-provided and search-approved origins.
+
+    Human-vs-agent session separation: every agent run gets its own controller
+    (see ``RuntimeService._browsers``, keyed by run id), each ``start()`` opens
+    a fresh ephemeral context with no ``storage_state`` or persistent profile,
+    so cookies and logins are never shared between runs — or with the human,
+    whose OAuth sign-in happens in a Tauri webview window (``oauth.rs``), not
+    in this Chromium instance.
+    """
 
     def __init__(self, run_id: str, authorized_origin: tuple[str, str, int] | None, data_dir: Path):
         self.run_id = run_id

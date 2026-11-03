@@ -68,6 +68,62 @@ fn keyring_entry(provider: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(KEYRING_SERVICE, provider).map_err(|_| "Could not access the system credential store.".into())
 }
 
+/// Keychain entry for a connected service OAuth account. The `oauth:` prefix
+/// keeps service tokens in a namespace separate from model API credentials
+/// (including the keychain `MODEL_API_KEY`), while sharing the app service.
+fn oauth_keyring_entry(provider: &str, account: &str) -> Result<keyring::Entry, String> {
+    if !crate::oauth::is_supported_provider(provider) {
+        return Err("Unknown service provider.".into());
+    }
+    let account = crate::oauth::sanitize_account_id(account)?;
+    let user = format!("oauth:{provider}:{account}");
+    keyring::Entry::new(KEYRING_SERVICE, &user)
+        .map_err(|_| "Could not access the system credential store.".into())
+}
+
+/// Non-secret metadata directory for connected service accounts. Tokens live
+/// only in the keychain; this directory holds status/scopes/expiry metadata.
+fn oauth_metadata_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_local_data_dir().map_err(|_| "Could not access KeplerV settings.".to_string())?.join("oauth-accounts");
+    fs::create_dir_all(&dir).map_err(|_| "Could not prepare service account settings.".to_string())?;
+    Ok(dir)
+}
+
+fn oauth_metadata_path(app: &AppHandle, provider: &str, account: &str) -> Result<PathBuf, String> {
+    let account = crate::oauth::sanitize_account_id(account)?;
+    let safe: String = account.chars().map(|c| if c == '@' { "_at_".to_string() } else { c.to_string() }).collect();
+    Ok(oauth_metadata_dir(app)?.join(format!("{provider}__{safe}.json")))
+}
+
+fn write_oauth_metadata(app: &AppHandle, meta: &crate::oauth::ConnectedAccountMeta) -> Result<(), String> {
+    let path = oauth_metadata_path(app, &meta.provider, &meta.email)?;
+    let temp = path.with_extension("json.tmp");
+    fs::write(&temp, serde_json::to_vec(meta).map_err(|_| "Could not save the service account.".to_string())?)
+        .map_err(|_| "Could not save the service account.".to_string())?;
+    fs::rename(temp, path).map_err(|_| "Could not save the service account.".to_string())
+}
+
+fn read_oauth_accounts(app: &AppHandle) -> Vec<crate::oauth::ConnectedAccountMeta> {
+    let Ok(dir) = oauth_metadata_dir(app) else { return Vec::new() };
+    let Ok(entries) = fs::read_dir(dir) else { return Vec::new() };
+    let mut accounts = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(raw) = fs::read(&path) else { continue };
+        let Ok(mut meta) = serde_json::from_slice::<crate::oauth::ConnectedAccountMeta>(&raw) else { continue };
+        // Derive liveness from expiry; stored "revoked" always wins.
+        if meta.status != "revoked" && meta.expires_at <= crate::oauth::current_time() {
+            meta.status = "expired".to_string();
+        }
+        accounts.push(meta);
+    }
+    accounts.sort_by(|a, b| (&a.provider, &a.email).cmp(&(&b.provider, &b.email)));
+    accounts
+}
+
 fn saved_secret(provider: &str) -> Option<String> {
     keyring_entry(provider).ok()?.get_password().ok()
 }
@@ -747,6 +803,73 @@ pub fn runtime_snapshot(
 }
 
 #[tauri::command]
+pub fn runtime_mail_list(
+    window: WebviewWindow,
+    state: State<'_, RuntimeBridge>,
+    provider: Option<String>,
+    email: Option<String>,
+    query: Option<String>,
+    limit: Option<u32>,
+) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    let slot = state
+        .runtime
+        .lock()
+        .map_err(|_| "Runtime state is unavailable.".to_string())?;
+    let runtime = slot
+        .as_ref()
+        .ok_or_else(|| "Runtime is not running.".to_string())?;
+    let client = authorized_client()?;
+    let mut path = format!("/mail/messages?limit={}", limit.unwrap_or(10).clamp(1, 25));
+    if let Some(provider) = provider.filter(|value| !value.trim().is_empty()) {
+        path.push_str(&format!("&provider={}", urlencoding(provider.trim())));
+    }
+    if let Some(email) = email.filter(|value| !value.trim().is_empty()) {
+        path.push_str(&format!("&email={}", urlencoding(email.trim())));
+    }
+    if let Some(query) = query.filter(|value| !value.trim().is_empty()) {
+        path.push_str(&format!("&q={}", urlencoding(query.trim())));
+    }
+    authenticated_get(&client, &runtime.base_url, &runtime.token, &path)
+}
+
+fn urlencoding(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+}
+
+#[tauri::command]
+pub fn runtime_mail_get(
+    window: WebviewWindow,
+    state: State<'_, RuntimeBridge>,
+    message_id: String,
+    provider: Option<String>,
+    email: Option<String>,
+) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    if message_id.trim().is_empty() || message_id.len() > 256 {
+        return Err("Mail message id was empty or too long.".into());
+    }
+    let slot = state
+        .runtime
+        .lock()
+        .map_err(|_| "Runtime state is unavailable.".to_string())?;
+    let runtime = slot
+        .as_ref()
+        .ok_or_else(|| "Runtime is not running.".to_string())?;
+    let client = authorized_client()?;
+    let mut path = format!("/mail/messages/{}", urlencoding(message_id.trim()));
+    let mut separator = "?";
+    if let Some(provider) = provider.filter(|value| !value.trim().is_empty()) {
+        path.push_str(&format!("{separator}provider={}", urlencoding(provider.trim())));
+        separator = "&";
+    }
+    if let Some(email) = email.filter(|value| !value.trim().is_empty()) {
+        path.push_str(&format!("{separator}email={}", urlencoding(email.trim())));
+    }
+    authenticated_get(&client, &runtime.base_url, &runtime.token, &path)
+}
+
+#[tauri::command]
 pub fn runtime_info(
     window: WebviewWindow,
     state: State<'_, RuntimeBridge>,
@@ -994,4 +1117,104 @@ pub fn runtime_guard_containment(
         &format!("/guard/cases/{case_id}/containment"),
         json!({"action":action,"reason":reason,"capability":capability}),
     )
+}
+
+#[tauri::command]
+pub async fn oauth_connect(
+    app: AppHandle,
+    window: WebviewWindow,
+    provider: String,
+    email: Option<String>,
+) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    if !crate::oauth::is_supported_provider(&provider) {
+        return Err("Unknown service provider.".into());
+    }
+    // OAuth waits, token exchange, and keychain writes are blocking. Keep them
+    // off Tauri's async/UI executor so the main window stays responsive.
+    let auth_app = app.clone();
+    let is_fake = provider == "fake-mail";
+    let worker_result = tauri::async_runtime::spawn_blocking(move || {
+        (|| {
+            let data_dir = auth_app.path().app_local_data_dir().map_err(|_| "Could not prepare service account settings.".to_string())?;
+            let token_set = if provider == "fake-mail" {
+                // Clearly-labeled local fixture: no browser, no network.
+                crate::oauth::connect_fake_account(email.as_deref().unwrap_or("demo.person@example.test"))?
+            } else {
+                crate::oauth::connect_account(&auth_app, &data_dir, &provider, email.as_deref())?
+            };
+            let serialized = serde_json::to_string(&token_set).map_err(|_| "Could not secure the service connection.".to_string())?;
+            oauth_keyring_entry(&token_set.provider, &token_set.account_email)?
+                .set_password(&serialized)
+                .map_err(|_| "Could not save the service connection in the system credential store.".to_string())?;
+            let meta = crate::oauth::metadata_for(&token_set, "connected");
+            write_oauth_metadata(&auth_app, &meta)?;
+            // Non-secret metadata only; tokens stay in the keychain.
+            Ok::<Value, String>(json!({"connected":true,"account":meta}))
+        })()
+    })
+    .await;
+    if !is_fake {
+        if let Some(auth_window) = app.get_webview_window("oauth-auth") {
+            let _ = auth_window.close();
+        }
+        let _ = window.set_focus();
+    }
+    worker_result.map_err(|_| "The service sign-in worker stopped unexpectedly.".to_string())?
+}
+
+#[tauri::command]
+pub async fn oauth_refresh(
+    app: AppHandle,
+    window: WebviewWindow,
+    provider: String,
+    email: String,
+) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    let auth_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        (|| {
+            let data_dir = auth_app.path().app_local_data_dir().map_err(|_| "Could not access service account settings.".to_string())?;
+            let raw = oauth_keyring_entry(&provider, &email)?.get_password().map_err(|_| "This account is not connected. Connect it again.".to_string())?;
+            let token_set: crate::oauth::OAuthTokenSet = serde_json::from_str(&raw).map_err(|_| "The stored connection could not be read. Reconnect the account.".to_string())?;
+            let refreshed = crate::oauth::refresh_token_set(&token_set, &data_dir)?;
+            let serialized = serde_json::to_string(&refreshed).map_err(|_| "Could not secure the refreshed connection.".to_string())?;
+            oauth_keyring_entry(&refreshed.provider, &refreshed.account_email)?
+                .set_password(&serialized)
+                .map_err(|_| "Could not update the service connection in the system credential store.".to_string())?;
+            let meta = crate::oauth::metadata_for(&refreshed, "connected");
+            write_oauth_metadata(&auth_app, &meta)?;
+            Ok::<Value, String>(json!({"refreshed":true,"account":meta}))
+        })()
+    })
+    .await
+    .map_err(|_| "The token refresh worker stopped unexpectedly.".to_string())?
+}
+
+#[tauri::command]
+pub fn oauth_disconnect(
+    app: AppHandle,
+    window: WebviewWindow,
+    provider: String,
+    email: String,
+) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    // Best-effort remote revocation first; local deletion happens regardless.
+    let remote_revoked = oauth_keyring_entry(&provider, &email)
+        .ok()
+        .and_then(|entry| entry.get_password().ok())
+        .and_then(|raw| serde_json::from_str::<crate::oauth::OAuthTokenSet>(&raw).ok())
+        .is_some_and(|token_set| crate::oauth::revoke_token_set(&token_set));
+    let _ = oauth_keyring_entry(&provider, &email)?.delete_credential();
+    if let Ok(path) = oauth_metadata_path(&app, &provider, &email) {
+        let _ = fs::remove_file(path);
+    }
+    Ok(json!({"disconnected":true,"remote_revoked":remote_revoked}))
+}
+
+#[tauri::command]
+pub fn account_status(app: AppHandle, window: WebviewWindow) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    let accounts = read_oauth_accounts(&app);
+    Ok(json!({"accounts":accounts}))
 }

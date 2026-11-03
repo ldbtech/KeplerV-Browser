@@ -10,11 +10,26 @@ from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from runtime.aip.policy import authorize_tool, is_demo_url, is_public_host
+from runtime.aip.policy import SERVICE_TOOLS, authorize_tool, is_demo_url, is_public_host
 from runtime.browser.controller import BrowserController, BrowserToolError
 from runtime.browser.tools import (
-    TOOL_SCHEMAS, DelegateArgs, ExtractArgs, FillArgs, InspectArgs, NavigateArgs, SearchArgs, SelectorArgs,
+    TOOL_SCHEMAS, CalendarCreateArgs, CalendarDeleteArgs, CalendarReadArgs, DelegateArgs,
+    DriveReadArgs, DriveShareArgs, ExtractArgs, FillArgs, GithubPublishArgs, GithubReadArgs,
+    GmailReadArgs, GmailSearchArgs, GmailSendArgs, InspectArgs, MailGetArgs, MailReadArgs,
+    MailSearchArgs, MediaControlArgs, MediaOpenArgs, NavigateArgs, SearchArgs, SelectorArgs,
 )
+from runtime.connectors.base import (
+    AccountRef,
+    AmbiguousAccountError,
+    MailNotConnectedError,
+    resolve_account,
+)
+from runtime.connectors.fake_adapter import FakeMailAdapter
+from runtime.connectors.gmail import GmailConnector
+from runtime.connectors.outlook import OutlookConnector
+from runtime.services.fake_services import FakeServiceAdapter
+from runtime.services.permissions import REVOKE_ACTION, grant_to, revoke_from
+from runtime.services.registry import STATUS_CONNECTED, ServiceRegistry
 from runtime.models import RunRequest
 from runtime.providers import ModelProviderError, ProviderRegistry
 from runtime.guard.observer import GuardObserver
@@ -36,6 +51,21 @@ WIRE_TO_CANONICAL = {
     "browser_click": "browser.click",
     "browser_fill": "browser.fill",
     "agent_delegate": "agent.delegate",
+    "mail_read": "mail.read",
+    "mail_search": "mail.search",
+    "mail_get": "mail.get",
+    "gmail_read": "gmail.read",
+    "gmail_search": "gmail.search",
+    "gmail_send": "gmail.send",
+    "calendar_read": "calendar.read",
+    "calendar_create": "calendar.create",
+    "calendar_delete": "calendar.delete",
+    "drive_read": "drive.read",
+    "drive_share": "drive.share",
+    "github_read": "github.read",
+    "github_publish": "github.publish",
+    "media_open": "media.open",
+    "media_control": "media.control",
 }
 ARG_MODELS: dict[str, type[BaseModel]] = {
     "web.search": SearchArgs,
@@ -46,6 +76,22 @@ ARG_MODELS: dict[str, type[BaseModel]] = {
     "browser.click": SelectorArgs,
     "browser.fill": FillArgs,
     "agent.delegate": DelegateArgs,
+    "mail.read": MailReadArgs,
+    "mail.search": MailSearchArgs,
+    "mail.get": MailGetArgs,
+    "gmail.read": GmailReadArgs,
+    "gmail.search": GmailSearchArgs,
+    "gmail.send": GmailSendArgs,
+    "mail.send": GmailSendArgs,
+    "calendar.read": CalendarReadArgs,
+    "calendar.create": CalendarCreateArgs,
+    "calendar.delete": CalendarDeleteArgs,
+    "drive.read": DriveReadArgs,
+    "drive.share": DriveShareArgs,
+    "github.read": GithubReadArgs,
+    "github.publish": GithubPublishArgs,
+    "media.open": MediaOpenArgs,
+    "media.control": MediaControlArgs,
 }
 TOOL_NAMES = list(WIRE_TO_CANONICAL.values())
 MAX_RESEARCH_PAGES = 2
@@ -86,10 +132,16 @@ class RuntimeService:
         browser_factory: Callable[..., BrowserController] = BrowserController,
         public_host_check: Callable[[str], bool] = is_public_host,
         search_func: Callable[..., Any] = search_public_web,
+        service_registry: ServiceRegistry | None = None,
+        mail_connectors: dict[str, Any] | None = None,
+        service_adapter: FakeServiceAdapter | None = None,
     ):
         self.store = store or RuntimeStore()
         self.guard_observer = GuardObserver(self.store)
         self.providers = providers or ProviderRegistry()
+        self.service_registry = service_registry
+        self._mail_connectors = mail_connectors
+        self._service_adapter = service_adapter
         self.guard_detective = GuardDetective(self.store, self.providers)
         self.guard_interrogator = GuardInterrogator(self.store, self.providers)
         self.guard_adjudicator = GuardAdjudicator(self.store, self.providers)
@@ -109,10 +161,200 @@ class RuntimeService:
         self._pending_approvals: dict[tuple[str, str], asyncio.Future] = {}
         self._spawning = asyncio.Lock()
 
+    def _services(self) -> ServiceRegistry:
+        if self.service_registry is None:
+            self.service_registry = ServiceRegistry()
+        return self.service_registry
+
+    def _fake_services(self) -> FakeServiceAdapter:
+        if self._service_adapter is None:
+            self._service_adapter = FakeServiceAdapter()
+        return self._service_adapter
+
+    def grant_service_access(self, run_id: str, permission: str) -> dict[str, Any]:
+        """Grant one exact service permission to one agent run (one goal).
+
+        Grants are per-agent/per-goal: they live on the run row and are
+        never copied to child agents. Emits the ``service.connected``
+        security event.
+        """
+        run = self.store.get_run(run_id)
+        if not run:
+            raise KeyError("Agent run was not found.")
+        updated = grant_to(list(run["permissions"]), permission)
+        self.store.update_run(run_id, permissions=json.dumps(updated))
+        self.store.add_event(run, "service.connected", "success", {
+            "summary": f"Service permission '{permission}' granted to this agent for this goal.",
+            "permission": permission, "agent_id": run["agent_id"], "goal_id": run["goal_id"],
+        })
+        return self.agent_view(self.store.get_run(run_id) or run)
+
+    def revoke_agent_service_access(self, run_id: str, permission: str | None = None) -> dict[str, Any]:
+        """Revoke one service grant (or every service grant when None).
+
+        This is the ``REVOKE_AGENT_SERVICE_ACCESS`` action. It edits the run
+        row directly, so it takes effect on the very next tool call — the
+        scheduler re-reads live permissions before every execution. Emits
+        the ``service.revoked`` security event.
+        """
+        run = self.store.get_run(run_id)
+        if not run:
+            raise KeyError("Agent run was not found.")
+        updated, removed = revoke_from(list(run["permissions"]), permission)
+        self.store.update_run(run_id, permissions=json.dumps(updated))
+        self.store.add_event(run, "service.revoked", "success", {
+            "summary": f"{REVOKE_ACTION}: revoked {', '.join(removed) or 'no service grants'}.",
+            "action": REVOKE_ACTION, "removed": removed,
+            "agent_id": run["agent_id"], "goal_id": run["goal_id"],
+        })
+        return self.agent_view(self.store.get_run(run_id) or run)
+
+    def _mail_connector(self, provider: str) -> Any:
+        if self._mail_connectors and provider in self._mail_connectors:
+            return self._mail_connectors[provider]
+        if provider == "fake-mail":
+            return FakeMailAdapter()
+        if provider == "gmail":
+            # No token supplier here: live Gmail tokens stay in the Rust
+            # keychain, so without injected credentials this raises a
+            # disconnected error instead of returning anything.
+            return GmailConnector()
+        if provider == "outlook":
+            return OutlookConnector()
+        raise ValueError(f"Unknown mail provider '{provider}'.")
+
+    async def execute_mail_tool(self, run: dict[str, Any], name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Resolve account, enforce status, and run a read-only mail tool.
+
+        Returns ``{"ok": False, "needs_disambiguation": True, ...}`` when the
+        reference matches several accounts — the caller must ask the user to
+        pick one; no silent auto-pick ever happens here.
+        """
+        registry = self._services()
+        try:
+            resolved = resolve_account(
+                AccountRef(provider=arguments.get("provider"), email=arguments.get("email")),
+                registry.list_accounts(),
+            )
+        except AmbiguousAccountError as exc:
+            return {"ok": False, "needs_disambiguation": True, "candidates": exc.candidates,
+                    "error": str(exc)}
+        except MailNotConnectedError as exc:
+            return {"ok": False, "error": str(exc)}
+        meta = registry.get(resolved.provider, resolved.email)
+        if meta is None:
+            return {"ok": False, "error": "That account is no longer connected."}
+        status = registry.effective_status(meta)
+        if status != STATUS_CONNECTED:
+            return {"ok": False, "error": f"Account {meta.email} is {status}. Reconnect it to read mail."}
+        try:
+            connector = self._mail_connector(resolved.provider)
+            if name == "mail.read":
+                result = await connector.list_messages(resolved, limit=arguments.get("limit", 10))
+            elif name == "mail.search":
+                result = await connector.search(resolved, arguments["query"], limit=arguments.get("limit", 10))
+            elif name == "mail.get":
+                result = {"message": await connector.get_message(resolved, arguments["message_id"]),
+                          "provider": resolved.provider, "account": resolved.email}
+            else:
+                return {"ok": False, "error": "This mail tool is not available."}
+        except AmbiguousAccountError as exc:
+            return {"ok": False, "needs_disambiguation": True, "candidates": exc.candidates,
+                    "error": str(exc)}
+        except (MailNotConnectedError, KeyError, ValueError, NotImplementedError) as exc:
+            return {"ok": False, "error": str(exc)[:500]}
+        if isinstance(result, dict):
+            result.setdefault("content_is_untrusted", True)
+            return {"ok": True, **result}
+        return {"ok": True, "result": result}
+
+    async def execute_service_send(self, run: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any]:
+        """Run gmail.send after AIP grant + approval. Fake outbox only.
+
+        The account must resolve to a connected, non-revoked account, and
+        only the clearly-labeled fake-mail fixture can send — real providers
+        fail loudly here instead of silently substituting anything.
+        """
+        registry = self._services()
+        try:
+            resolved = resolve_account(
+                AccountRef(provider=arguments.get("provider"), email=arguments.get("email")),
+                registry.list_accounts(),
+            )
+        except AmbiguousAccountError as exc:
+            return {"ok": False, "needs_disambiguation": True, "candidates": exc.candidates,
+                    "error": str(exc)}
+        except MailNotConnectedError as exc:
+            return {"ok": False, "error": str(exc)}
+        meta = registry.get(resolved.provider, resolved.email)
+        if meta is None:
+            return {"ok": False, "error": "That account is no longer connected."}
+        status = registry.effective_status(meta)
+        if status != STATUS_CONNECTED:
+            return {"ok": False, "error": f"Account {meta.email} is {status}. Reconnect it to send mail."}
+        if resolved.provider != "fake-mail":
+            return {"ok": False, "error": (
+                "Live send is not wired: only the labeled fake-mail fixture supports "
+                "gmail.send in tests and demos. Nothing was sent.")}
+        try:
+            result = await self._fake_services().send_gmail(
+                resolved.email, arguments["to"], arguments["subject"], arguments["body"])
+        except (ValueError, KeyError) as exc:
+            return {"ok": False, "error": str(exc)[:500]}
+        result.setdefault("content_is_untrusted", True)
+        return {"ok": True, **result}
+
+    async def execute_service_tool(self, run: dict[str, Any], name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Run a calendar/drive/github/media tool against fake fixtures.
+
+        All service reads/writes outside gmail run against the
+        clearly-labeled FakeServiceAdapter; there is no live path.
+        """
+        adapter = self._fake_services()
+        try:
+            if name == "calendar.read":
+                result = await adapter.calendar_read(limit=arguments.get("limit", 10))
+            elif name == "calendar.create":
+                result = await adapter.calendar_create(
+                    arguments["title"], arguments["start"], arguments.get("end"))
+            elif name == "calendar.delete":
+                result = await adapter.calendar_delete(arguments["event_id"])
+            elif name == "drive.read":
+                result = await adapter.drive_read(
+                    query=arguments.get("query"), limit=arguments.get("limit", 10))
+            elif name == "drive.share":
+                result = await adapter.drive_share(arguments["file_id"], arguments["share_with"])
+            elif name == "github.read":
+                result = await adapter.github_read(repo=arguments.get("repo"))
+            elif name == "github.publish":
+                result = await adapter.github_publish(
+                    arguments["repo"], arguments["title"], arguments.get("body", ""))
+            elif name == "media.open":
+                result = await adapter.media_open(arguments["target"], arguments.get("video_id"))
+            elif name == "media.control":
+                result = await adapter.media_control(arguments["action"], arguments.get("target"))
+            else:
+                return {"ok": False, "error": "This service tool is not available."}
+        except (ValueError, KeyError) as exc:
+            return {"ok": False, "error": str(exc)[:500]}
+        if isinstance(result, dict):
+            result.setdefault("content_is_untrusted", True)
+            return {"ok": True, **result}
+        return {"ok": True, "result": result}
+
     async def create_run(self, request: RunRequest) -> dict[str, Any]:
         values = request.model_dump(mode="json")
         values["source_url"] = str(request.source_url) if request.source_url else ""
         permissions = ["browser.read", "browser.interact", "delegate"]
+        try:
+            if any(self._services().effective_status(account) == STATUS_CONNECTED
+                   for account in self._services().list_accounts()):
+                permissions.append("mail.read")
+        except Exception:
+            pass
+        # M8: service grants (gmail.*/calendar.*/drive.*/github.*/media.*) are
+        # never auto-added here; each grant is explicit per-agent/per-goal via
+        # grant_service_access, and children never inherit them.
         run = self.store.create_run(
             values, self.providers.active_provider, self.providers.active_model,
             TOOL_NAMES, permissions,
@@ -206,7 +448,18 @@ class RuntimeService:
         run = self.store.get_run(run_id)
         if run:
             event = self.store.add_event(run, kind, status, payload, tool)
-            if kind == "aip.decision":
+            if kind == "aip.decision" and status == "denied" and (tool or "") in SERVICE_TOOLS:
+                # Security event: every denied service-tool decision also
+                # records a service.access_denied event for Guard + audit.
+                denied = self.store.add_event(run, "service.access_denied", "denied", {
+                    "call_id": (payload or {}).get("call_id"),
+                    "outcome": "deny", "reason": (payload or {}).get("reason"),
+                    "summary": f"Service access denied for {tool}: grant missing or revoked.",
+                }, tool)
+                case = self.guard_observer.observe(denied)
+                if case:
+                    self._schedule_guard_screening(case)
+            if kind in {"aip.decision", "service.access_denied"}:
                 case = self.guard_observer.observe(event)
                 if case:
                     self._schedule_guard_screening(case)
@@ -625,6 +878,38 @@ class RuntimeService:
                 result = await browser.click(parsed_args)
             elif name == "browser.fill":
                 result = await browser.fill(parsed_args)
+            elif name in ("mail.read", "mail.search", "mail.get"):
+                mail_result = await self.execute_mail_tool(run, name, parsed_args)
+                if mail_result.get("ok"):
+                    self._event(run["id"], "tool.execution.completed", "success", {"call_id": call_id, "summary": f"{name} completed"}, name)
+                else:
+                    self._event(run["id"], "tool.execution.completed", "error", {"call_id": call_id, "summary": str(mail_result.get("error", ""))[:300]}, name)
+                return mail_result
+            elif name in ("gmail.read", "gmail.search"):
+                legacy = "mail.read" if name == "gmail.read" else "mail.search"
+                mail_result = await self.execute_mail_tool(run, legacy, parsed_args)
+                if mail_result.get("ok"):
+                    self._event(run["id"], "tool.execution.completed", "success", {"call_id": call_id, "summary": f"{name} completed"}, name)
+                else:
+                    self._event(run["id"], "tool.execution.completed", "error", {"call_id": call_id, "summary": str(mail_result.get("error", ""))[:300]}, name)
+                return mail_result
+            elif name in ("gmail.send", "mail.send"):
+                send_result = await self.execute_service_send(run, parsed_args)
+                if send_result.get("ok"):
+                    self._event(run["id"], "tool.execution.completed", "success", {
+                        "call_id": call_id, "summary": f"{name} completed",
+                        "to": parsed_args.get("to"), "message_id": send_result.get("message_id"),
+                    }, name)
+                else:
+                    self._event(run["id"], "tool.execution.completed", "error", {"call_id": call_id, "summary": str(send_result.get("error", ""))[:300]}, name)
+                return send_result
+            elif name in SERVICE_TOOLS:
+                service_result = await self.execute_service_tool(run, name, parsed_args)
+                if service_result.get("ok"):
+                    self._event(run["id"], "tool.execution.completed", "success", {"call_id": call_id, "summary": f"{name} completed"}, name)
+                else:
+                    self._event(run["id"], "tool.execution.completed", "error", {"call_id": call_id, "summary": str(service_result.get("error", ""))[:300]}, name)
+                return service_result
             else:
                 raise BrowserToolError("Unsupported browser operation.")
             self._event(run["id"], "tool.execution.completed", "success", {"call_id": call_id, "summary": f"{name} completed"}, name)
@@ -652,6 +937,8 @@ class RuntimeService:
             if len(children) >= 2 or depth >= 2:
                 self._event(run["id"], "aip.decision", "denied", {"call_id": call_id, "outcome": "deny", "reason": "Delegation count or depth limit reached."}, name)
                 return {"ok": False, "error": "Delegation count or depth limit reached."}
+            # M8: no inheritance-by-default — children start with browser
+            # read only and never receive the parent's service grants.
             child_permissions = ["browser.read"]
             if depth + 1 < 2:
                 child_permissions.append("delegate")

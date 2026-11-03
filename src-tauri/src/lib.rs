@@ -4,6 +4,7 @@ use url::Url;
 
 mod runtime_bridge;
 mod chatgpt_auth;
+mod oauth;
 
 static RESOURCE_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -58,6 +59,8 @@ pub fn run() {
             open_public_resource,
             runtime_bridge::runtime_start,
             runtime_bridge::runtime_snapshot,
+            runtime_bridge::runtime_mail_list,
+            runtime_bridge::runtime_mail_get,
             runtime_bridge::runtime_info,
         runtime_bridge::transcribe_audio,
         runtime_bridge::interpret_voice,
@@ -75,7 +78,11 @@ pub fn run() {
             runtime_bridge::credential_chatgpt_disconnect,
             runtime_bridge::provider_connect,
             runtime_bridge::provider_configuration,
-            runtime_bridge::provider_activate
+            runtime_bridge::provider_activate,
+            runtime_bridge::oauth_connect,
+            runtime_bridge::oauth_refresh,
+            runtime_bridge::oauth_disconnect,
+            runtime_bridge::account_status
         ])
         .build(tauri::generate_context!())
         .expect("error while building KeplerV")
@@ -105,5 +112,31 @@ mod tests {
         assert!(!is_allowed_resource(&unusual_port));
         let credentials = Url::parse("https://user:secret@www.nps.gov/").unwrap();
         assert!(!is_allowed_resource(&credentials));
+    }
+
+    #[test]
+    fn oauth_registry_covers_mail_providers_and_fake_fixture() {
+        assert!(crate::oauth::is_supported_provider("gmail"));
+        assert!(crate::oauth::is_supported_provider("outlook"));
+        assert!(crate::oauth::is_supported_provider("fake-mail"));
+        for provider in crate::oauth::SUPPORTED_PROVIDERS {
+            let config = crate::oauth::provider_config(provider).expect("supported provider needs a descriptor");
+            assert!(!config.scopes.is_empty());
+            assert!(config.capabilities.contains(&"mail.read".to_string()));
+        }
+    }
+
+    #[test]
+    fn oauth_pkce_challenge_matches_rfc7636_vector() {
+        assert_eq!(
+            crate::oauth::pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
+
+    #[test]
+    fn oauth_callback_state_mismatch_is_rejected() {
+        let err = crate::oauth::parse_callback_path("/oauth/callback?code=abc&state=wrong", "expected").unwrap_err();
+        assert!(err.contains("could not be verified"), "unexpected: {err}");
     }
 }

@@ -65,7 +65,17 @@
       "../runtime/guard/adjudicator.py": "runtime/guard/adjudicator.py",
       "../runtime/guard/containment.py": "runtime/guard/containment.py",
       "../runtime/guard/risk.py": "runtime/guard/risk.py",
-      "../runtime/guard/screening.py": "runtime/guard/screening.py"
+      "../runtime/guard/screening.py": "runtime/guard/screening.py",
+      "../runtime/services/__init__.py": "runtime/services/__init__.py",
+      "../runtime/services/registry.py": "runtime/services/registry.py",
+      "../runtime/services/fake_provider.py": "runtime/services/fake_provider.py",
+      "../runtime/services/permissions.py": "runtime/services/permissions.py",
+      "../runtime/services/fake_services.py": "runtime/services/fake_services.py",
+      "../runtime/connectors/__init__.py": "runtime/connectors/__init__.py",
+      "../runtime/connectors/base.py": "runtime/connectors/base.py",
+      "../runtime/connectors/gmail.py": "runtime/connectors/gmail.py",
+      "../runtime/connectors/outlook.py": "runtime/connectors/outlook.py",
+      "../runtime/connectors/fake_adapter.py": "runtime/connectors/fake_adapter.py"
     },
     "icon": [
       "icons/32x32.png",
