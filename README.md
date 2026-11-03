@@ -78,6 +78,7 @@ Run `npm run test:browser` to exercise the scheduler and event/evidence store ag
 | Guard Adjudicator | Independent Muse Wonder review excludes the Detective report, validates citations, distinguishes denials from completed actions, and records contradictions and uncertainty for human review; it cannot change AIP policy; live model calls remain unverified |
 | Guard containment | A human-confirmed pause/resume is routed through the trusted runtime, recorded in the hash-chained case history, and leaves AIP policy unchanged; deny-pending, revocation, browser isolation, and automatic emergency rules remain unimplemented |
 | Provider connections | Cloud credentials are saved in macOS Keychain; provider settings and local model endpoints stay on-device; ChatGPT account tokens are refreshed and used only when plan usage was authorized |
+| Offline workspace | Explicitly selectable from the goal panel when no model is connected; goals, tasks, and local helpers stay available while research stays gated and nothing is presented as live |
 | Voice transcription | Still a labeled selectable demonstration; no speech-to-text model is connected |
 | UB schedule PDF | Existing guided product demonstration; it is not produced by the research runtime |
 | Legacy sample goals and agents | Existing workspace examples remain local; Guard cases now come from actual runtime AIP decisions |

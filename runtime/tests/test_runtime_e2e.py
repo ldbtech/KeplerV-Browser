@@ -1,5 +1,7 @@
+import gc
 import json
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -147,6 +149,74 @@ class ApprovalRegistry(FakeRegistry):
     def __init__(self): self.adapter = ApprovalModel()
 
 
+def _scripted_findings_text():
+    return json.dumps({"findings": [
+        {"finding": "Asyncio supports concurrent code in a single thread.", "quote": "single-threaded concurrent code"},
+        {"finding": "The event loop manages asynchronous work and I/O.", "quote": "runs asynchronous tasks and callbacks"},
+        {"finding": "Coroutines can suspend using await.", "quote": "can suspend execution with await"},
+    ]})
+
+
+class DelegatingModel:
+    SUBTASK = "Verify the asyncio event-loop passage on the docs page."
+
+    def __init__(self): self.calls = 0
+
+    def _tool_turn(self, name, args):
+        self.calls += 1
+        raw_call = {"id": f"delegate-flow-{self.calls}", "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+        return ModelDecision(tool_calls=[ToolCall(id=raw_call["id"], name=name, arguments=args)],
+            raw_assistant_message={"role": "assistant", "content": None, "tool_calls": [raw_call]})
+
+    def _research_turn(self, step):
+        if step == 0:
+            return self._tool_turn("browser_navigate", {"url": "https://docs.python.org/3/library/asyncio.html"})
+        if step == 1:
+            return self._tool_turn("browser_extract_text", {})
+        text = _scripted_findings_text()
+        return ModelDecision(message=text, raw_assistant_message={"role": "assistant", "content": text})
+
+    async def generate(self, model, messages, tools):
+        steps = sum(1 for item in messages if item.get("role") == "assistant")
+        is_child = any(self.SUBTASK in str(item.get("content", "")) for item in messages)
+        if not is_child and steps == 0:
+            return self._tool_turn("agent_delegate", {"task": self.SUBTASK})
+        return self._research_turn(steps - (0 if is_child else 1))
+
+
+class DelegatingRegistry(FakeRegistry):
+    def __init__(self): self.adapter = DelegatingModel()
+
+
+class HandoffModel:
+    CHILD_MARKER = "Finish from the transferred sources now."
+
+    def __init__(self): self.calls = 0
+
+    async def generate(self, model, messages, tools):
+        if any(self.CHILD_MARKER in str(item.get("content", "")) for item in messages):
+            text = _scripted_findings_text()
+            return ModelDecision(message=text, raw_assistant_message={"role": "assistant", "content": text})
+        steps = sum(1 for item in messages if item.get("role") == "assistant")
+        plan = [
+            ("browser_navigate", {"url": "https://docs.python.org/3/library/asyncio.html"}, {}),
+            ("browser_extract_text", {}, {}),
+            ("browser_inspect", {}, {"total_tokens": 3200}),
+        ]
+        if steps >= len(plan):
+            text = _scripted_findings_text()
+            return ModelDecision(message=text, raw_assistant_message={"role": "assistant", "content": text})
+        name, args, usage = plan[steps]
+        self.calls += 1
+        raw_call = {"id": f"handoff-flow-{self.calls}", "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+        return ModelDecision(tool_calls=[ToolCall(id=raw_call["id"], name=name, arguments=args)],
+            raw_assistant_message={"role": "assistant", "content": None, "tool_calls": [raw_call]}, usage=usage)
+
+
+class HandoffRegistry(FakeRegistry):
+    def __init__(self): self.adapter = HandoffModel()
+
+
 @pytest.mark.asyncio
 async def test_real_runtime_loop_records_events_evidence_and_denies_bad_origin(tmp_path):
     FakeBrowser.navigations = []
@@ -281,6 +351,47 @@ async def test_delegation_count_and_depth_are_bounded(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_model_delegation_spawns_bounded_child_and_returns_result(tmp_path):
+    service = RuntimeService(RuntimeStore(tmp_path / "delegate-exec.sqlite3"), DelegatingRegistry(), FakeBrowser, public_host_check=lambda _: True)
+    agent = await service.create_run(RunRequest(
+        goal_id="goal-delegate", goal_title="Delegate test", goal_description="Check model-initiated delegation.",
+        task="Delegate once, then finish the research yourself.",
+        source_url="https://docs.python.org/3/library/asyncio.html",
+    ))
+    await service._tasks[agent["id"]]
+    parent = service.store.get_run(agent["id"])
+    children = [run for run in service.store.list_runs() if run.get("parent_agent_id") == parent["agent_id"]]
+    assert parent["status"] == "completed", parent["error"]
+    assert len(children) == 1 and children[0]["status"] == "completed", children[0]["error"] if children else "no child spawned"
+    assert set(children[0]["permissions"]) <= set(parent["permissions"])
+    assert "browser.interact" not in children[0]["permissions"]
+    events = service.store.list_events()
+    assert any(event["type"] == "agent.delegated" and event["run_id"] == parent["id"] for event in events)
+    returned = next(event for event in events if event["type"] == "agent.delegation_returned" and event["run_id"] == parent["id"])
+    assert returned["payload"]["result"] is not None
+    assert len(service.store.list_evidence("goal-delegate")) == 6
+
+
+@pytest.mark.asyncio
+async def test_token_handoff_moves_run_to_continuation_child(tmp_path):
+    service = RuntimeService(RuntimeStore(tmp_path / "handoff.sqlite3"), HandoffRegistry(), FakeBrowser, public_host_check=lambda _: True)
+    agent = await service.create_run(RunRequest(
+        goal_id="goal-handoff", goal_title="Handoff test", goal_description="Check continuation near the token limit.",
+        source_url="https://docs.python.org/3/library/asyncio.html", token_budget=5000,
+    ))
+    await service._tasks[agent["id"]]
+    parent = service.store.get_run(agent["id"])
+    children = [run for run in service.store.list_runs() if run.get("parent_agent_id") == parent["agent_id"]]
+    assert parent["status"] == "completed", parent["error"]
+    assert len(children) == 1 and children[0]["status"] == "completed", children[0]["error"] if children else "no continuation spawned"
+    assert children[0]["token_budget"] == 1800
+    assert parent["tokens_used"] == 3200 + children[0]["tokens_used"]
+    events = service.store.list_events()
+    assert any(event["type"] == "agent.delegated" and event["payload"].get("remaining_tokens") == 1800 for event in events)
+    assert len(service.store.list_evidence("goal-handoff")) == 3
+
+
+@pytest.mark.asyncio
 async def test_stopping_parent_stops_active_delegates(tmp_path):
     store = RuntimeStore(tmp_path / "stop-tree.sqlite3")
     values = {"goal_id":"g", "goal_title":"Research", "goal_description":"Details", "task":"Research task",
@@ -291,6 +402,24 @@ async def test_stopping_parent_stops_active_delegates(tmp_path):
     await service.control(root["id"], "stop")
     assert store.get_run(root["id"])["status"] == "stopped"
     assert store.get_run(child["id"])["status"] == "stopped"
+
+
+def test_store_releases_database_handles_without_gc(tmp_path):
+    if not os.path.isdir("/dev/fd"):
+        pytest.skip("file-descriptor accounting needs /dev/fd")
+    store = RuntimeStore(tmp_path / "handles.sqlite3")
+    run = store.create_run({"goal_id": "g", "goal_title": "T", "goal_description": "D", "task": "Task",
+        "source_url": "https://docs.python.org/", "step_budget": 8, "token_budget": 5000},
+        "meta", "muse-spark-test", [], ["browser.read"])
+    gc.disable()
+    try:
+        before = len(os.listdir("/dev/fd"))
+        for _ in range(25):
+            store.get_run(run["id"])
+            store.list_events()
+        assert len(os.listdir("/dev/fd")) <= before
+    finally:
+        gc.enable()
 
 
 def test_sqlite_store_persists_runs_events_and_evidence(tmp_path):

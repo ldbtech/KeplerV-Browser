@@ -24,4 +24,5 @@ export const initialState: AppState = {
   evidence: [],
   theme: "system",
   simulationTime: Date.parse("2026-11-02T14:00:00.000Z"),
+  offlineMode: false,
 };

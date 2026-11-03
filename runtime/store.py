@@ -4,6 +4,7 @@ import json
 import hashlib
 import os
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from threading import RLock
 from typing import Any
@@ -21,11 +22,19 @@ class RuntimeStore:
         self._lock = RLock()
         self._initialize()
 
+    @contextmanager
     def _connect(self):
         connection = sqlite3.connect(self.db_path, timeout=5)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def _initialize(self) -> None:
         with self._lock, self._connect() as db:

@@ -41,6 +41,11 @@ export function transitionAgent(state: AppState, agentId: string, action: "pause
   return appendEvent(next, type, { summary: `${agent.name} ${action}d`, action }, agentId, goalId);
 }
 
+export function setOfflineMode(state: AppState, enabled: boolean): AppState {
+  if (state.offlineMode === enabled) return state;
+  return appendEvent({ ...state, offlineMode: enabled }, enabled ? "offline_mode_enabled" : "offline_mode_disabled", { summary: enabled ? "Offline workspace selected. Local goals and helpers remain available; Muse research needs a connection." : "Online research re-enabled." });
+}
+
 export function advanceSimulationClock(state: AppState): AppState {
   const next = { ...state, simulationTime: state.simulationTime + 60_000 };
   return appendEvent(next, "simulation_clock_advanced", { summary: "Workspace clock advanced by one minute" });

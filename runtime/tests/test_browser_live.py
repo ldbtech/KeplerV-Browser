@@ -27,7 +27,7 @@ class ObservedPageModel:
         if self.turn == 1:
             name, arguments = "browser_navigate", {"url": SOURCE}
         elif self.turn == 2:
-            name, arguments = "browser_extract_text", {"max_chars": 12000}
+            name, arguments = "browser_extract_text", {"max_chars": 3500}
         else:
             observation = next(
                 json.loads(message["content"])

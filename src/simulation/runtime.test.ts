@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { evaluateAction, isSubset } from "./aipPolicy";
-import { addTask, advanceSimulationClock, createAgent, createGoal, spawnSubagent, transitionAgent } from "./runtime";
+import { addTask, advanceSimulationClock, createAgent, createGoal, setOfflineMode, spawnSubagent, transitionAgent } from "./runtime";
 import { initialState, MAX_CHILDREN, MAX_DEPTH } from "./seed";
 import type { AppState } from "../types";
 
@@ -62,6 +62,16 @@ describe("goal and agent runtime", () => {
     expect(restored.goals[0].id).toBe(state.goals[0].id);
     expect(restored.agents[0].permissions).toEqual(state.agents[0].permissions);
     expect(restored.events[0].type).toBe("agent_created");
+  });
+
+  it("selects offline mode explicitly and records the choice", () => {
+    const offline = setOfflineMode(fresh(), true);
+    expect(offline.offlineMode).toBe(true);
+    expect(offline.events[0].type).toBe("offline_mode_enabled");
+    expect(setOfflineMode(offline, true)).toBe(offline);
+    const online = setOfflineMode(offline, false);
+    expect(online.offlineMode).toBe(false);
+    expect(online.events[0].type).toBe("offline_mode_disabled");
   });
 
   it("advances the mock clock only when explicitly stepped", () => {
