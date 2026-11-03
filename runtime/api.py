@@ -12,12 +12,19 @@ from runtime.guard.evidence import GuardEvidenceService
 from runtime.guard.detective import GuardInvestigationError
 from runtime.guard.interrogation import GuardInterviewError
 from runtime.scheduler import RuntimeService
+from runtime.voice.transcribe import MetaVoiceTranscriber, VoiceTranscriptionError
+from runtime.voice.intent import InterpretationError, InterpretRequest, interpret as interpret_voice_command
+from runtime.demo.university import PAGES, page_html
 
 
 def create_app(service: RuntimeService | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.runtime_service = service or RuntimeService()
+        try:
+            await app.state.runtime_service.reschedule_guard_screening()
+        except Exception:
+            pass
         yield
 
     app = FastAPI(title="KeplerV local runtime", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -30,6 +37,38 @@ def create_app(service: RuntimeService | None = None) -> FastAPI:
     @app.get("/healthz")
     async def health(_: None = Depends(authenticated)):
         return {"status": "ready", "runtime": "keplerv-uar"}
+
+    @app.get("/demo/university/{page}")
+    async def demo_university_page(page: str):
+        from fastapi.responses import HTMLResponse
+        if page not in PAGES:
+            raise HTTPException(status_code=404, detail="Unknown demo page.")
+        return HTMLResponse(page_html(page))
+
+    @app.post("/transcribe")
+    async def transcribe_voice(request: Request, _: None = Depends(authenticated)):
+        audio = await request.body()
+        if not audio:
+            raise HTTPException(status_code=400, detail="Voice recording was empty.")
+        try:
+            return await MetaVoiceTranscriber().transcribe(audio)
+        except VoiceTranscriptionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/runs/{run_id}/trace")
+    async def run_trace(run_id: str, request: Request, _: None = Depends(authenticated)):
+        try:
+            return request.app.state.runtime_service.trace_run(run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/interpret")
+    async def interpret_voice(body: InterpretRequest, request: Request, _: None = Depends(authenticated)):
+        service = request.app.state.runtime_service
+        try:
+            return (await interpret_voice_command(body.transcript, body.context, service.providers)).model_dump(mode="json")
+        except InterpretationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/runs", status_code=202)
     async def create_run(body: RunRequest, request: Request, _: None = Depends(authenticated)):
@@ -150,7 +189,7 @@ def create_app(service: RuntimeService | None = None) -> FastAPI:
         if not service.guard_observer.cases.can_read(case_id):
             raise HTTPException(status_code=403, detail="Guard case access required.")
         try:
-            return await service.guard_containment.apply(case_id, body.action, body.reason, "local_user")
+            return await service.guard_containment.apply(case_id, body.action, body.reason, "local_user", body.capability)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except LookupError as exc:

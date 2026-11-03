@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from runtime.aip.policy import authorize_tool, is_public_host
+from runtime.aip.policy import authorize_tool, is_demo_url, is_public_host
 from runtime.browser.controller import BrowserController, BrowserToolError
 from runtime.browser.tools import (
     TOOL_SCHEMAS, DelegateArgs, ExtractArgs, FillArgs, InspectArgs, NavigateArgs, SearchArgs, SelectorArgs,
@@ -103,6 +103,7 @@ class RuntimeService:
         self._visited_urls: dict[str, set[str]] = {}
         self._authorized_origins: dict[str, set[tuple[str, str, int]]] = {}
         self._tasks: dict[str, asyncio.Task] = {}
+        self._browsers: dict[str, BrowserController] = {}
         self._pause_gates: dict[str, asyncio.Event] = {}
         self._stop_flags: dict[str, asyncio.Event] = {}
         self._pending_approvals: dict[tuple[str, str], asyncio.Future] = {}
@@ -126,7 +127,7 @@ class RuntimeService:
         return {key: run.get(key) for key in (
             "id", "agent_id", "parent_agent_id", "goal_id", "goal_title", "task", "provider", "model",
             "status", "permissions", "tools", "step_budget", "token_budget", "steps", "tokens_used",
-            "error", "created_at", "updated_at", "result",
+            "browser_isolated", "error", "created_at", "updated_at", "result",
         )}
 
     def _schedule(self, run_id: str) -> None:
@@ -212,6 +213,16 @@ class RuntimeService:
             return event
         return None
 
+    async def reschedule_guard_screening(self) -> int:
+        """Re-screen cases missed by a restart; Guard work otherwise resumes from storage."""
+        rescheduled = 0
+        for case in self.guard_observer.cases.list_cases():
+            if any(item["source_type"] in {"guard_screening", "guard_screening_error"} for item in case["evidence"]):
+                continue
+            self._schedule_guard_screening(case)
+            rescheduled += 1
+        return rescheduled
+
     def _schedule_guard_screening(self, case: dict[str, Any]) -> None:
         case_id = case["id"]
         if case_id in self._guard_screening_tasks:
@@ -238,6 +249,7 @@ class RuntimeService:
         if not run:
             return
         browser = self.browser_factory(run_id, _authorized_origin(run["source_url"]), self.store.db_path.parent)
+        self._browsers[run_id] = browser
         messages = run["conversation"]
         searched_urls = self._searched_urls.setdefault(run_id, set())
         visited_urls = self._visited_urls.setdefault(run_id, set())
@@ -370,7 +382,37 @@ class RuntimeService:
             message = str(exc)[:500] or "Agent failed unexpectedly."
             self._fail(run_id, message, "agent.failed")
         finally:
+            self._browsers.pop(run_id, None)
             await browser.close()
+
+    def deny_pending_approvals(self, run_id: str) -> int:
+        denied = 0
+        for (pending_run_id, _call_id), future in list(self._pending_approvals.items()):
+            if pending_run_id == run_id and not future.done():
+                future.set_result(False)
+                denied += 1
+        return denied
+
+    async def isolate_browser(self, run_id: str) -> None:
+        browser = self._browsers.pop(run_id, None)
+        if browser is not None:
+            try:
+                await browser.close()
+            except Exception:
+                pass
+        self.store.set_browser_isolated(run_id, True)
+        run = self.store.get_run(run_id)
+        if run:
+            self.store.add_event(run, "agent.contained", "success",
+                                 {"action": "isolate_browser", "summary": "Browser session isolated by Guard containment."})
+
+    async def restore_browser(self, run_id: str) -> None:
+        run = self.store.get_run(run_id)
+        if not run or not run.get("browser_isolated"):
+            raise ValueError("Browser session is not isolated.")
+        self.store.set_browser_isolated(run_id, False)
+        self.store.add_event(run, "agent.contained", "success",
+                             {"action": "restore_browser", "summary": "Browser session restored by the local user."})
 
     @staticmethod
     def _safe_assistant_message(raw: dict[str, Any], decision) -> dict[str, Any]:
@@ -474,6 +516,13 @@ class RuntimeService:
             self._event(run["id"], "agent.failed", "error", {"summary": message, "child_agent_id": child["agent_id"]})
 
     async def _execute_tool(self, run: dict[str, Any], browser: BrowserController, name: str, arguments: dict[str, Any], call_id: str) -> dict[str, Any]:
+        live = self.store.get_run(run["id"])
+        if live:
+            run = {**run, "permissions": live["permissions"]}
+        if name.startswith("browser.") and live and live.get("browser_isolated"):
+            self._event(run["id"], "aip.decision", "denied",
+                        {"call_id": call_id, "outcome": "deny", "reason": "Browser session is isolated by Guard containment."}, name)
+            return {"ok": False, "error": "Browser session is isolated by Guard containment."}
         if name == "agent.delegate":
             try:
                 arguments = DelegateArgs.model_validate(arguments).model_dump(mode="json")
@@ -521,6 +570,9 @@ class RuntimeService:
             finally:
                 self._pending_approvals.pop((run["id"], call_id), None)
             await self._wait_boundary(run["id"])
+            refreshed = self.store.get_run(run["id"])
+            if refreshed:
+                run = {**run, "permissions": refreshed["permissions"]}
             if not approved:
                 self.store.update_run(run["id"], status="running")
                 self._event(run["id"], "tool.approval_denied", "denied", {"call_id": call_id}, name)
@@ -530,7 +582,7 @@ class RuntimeService:
                 agent_id=run["agent_id"], registered_agent_id=run["agent_id"], goal_id=run["goal_id"],
                 registered_goal_id=run["goal_id"], permissions=set(run["permissions"]), tool_name=name,
                 arguments=parsed_args, authorized_origin=_authorized_origin(run["source_url"]), authorized_origins=self._authorized_origins.setdefault(run["id"], set()), current_url=run.get("current_url"), user_approved=True, public_host_check=self.public_host_check)
-            self._event(run["id"], "aip.decision", "allowed", {"call_id": call_id, "outcome": decision.outcome, "reason": decision.reason}, name)
+            self._event(run["id"], "aip.decision", "allowed" if decision.outcome == "allow" else "denied", {"call_id": call_id, "outcome": decision.outcome, "reason": decision.reason}, name)
             self.store.update_run(run["id"], status="running")
         if decision.outcome != "allow":
             return {"ok": False, "error": decision.reason}
@@ -555,7 +607,7 @@ class RuntimeService:
                     safe_results.append({"url": url, "title": str(item.get("title", ""))[:300], "snippet": str(item.get("snippet", ""))[:400]})
                 result = {"query": parsed_args["query"], "results": safe_results, "content_is_untrusted": True}
             elif name == "browser.navigate":
-                if parsed_args["url"] not in self._searched_urls.setdefault(run["id"], set()) and parsed_args["url"] not in {run.get("source_url"), run.get("current_url")}:
+                if not is_demo_url(parsed_args["url"]) and parsed_args["url"] not in self._searched_urls.setdefault(run["id"], set()) and parsed_args["url"] not in {run.get("source_url"), run.get("current_url")}:
                     return {"ok": False, "error": "Navigate only to a URL returned by web_search or directly provided by the user."}
                 if parsed_args["url"] not in self._visited_urls.setdefault(run["id"], set()) and len(self._visited_urls[run["id"]]) >= MAX_RESEARCH_PAGES:
                     return {"ok": False, "error": "This research run has reached its two-page source limit. Use the sources already reviewed to complete the findings."}
@@ -634,6 +686,57 @@ class RuntimeService:
     async def _has_delegation_budget(self, run: dict[str, Any]) -> bool:
         children = [item for item in self.store.list_runs() if item.get("parent_agent_id") == run["agent_id"]]
         return len(children) < 2 and self._agent_depth(run["agent_id"]) < 2 and "delegate" in run["permissions"]
+
+    def trace_run(self, run_id: str) -> dict[str, Any]:
+        from datetime import datetime
+        run = self.store.get_run(run_id)
+        if not run:
+            raise KeyError("Run not found.")
+        events = [event for event in self.store.list_events() if event["run_id"] == run_id]
+
+        def _at(event: dict[str, Any]) -> datetime:
+            return datetime.fromisoformat(event["timestamp"])
+
+        model_ms, tool_ms = 0, 0
+        model_calls: list[dict[str, Any]] = []
+        tool_calls: list[dict[str, Any]] = []
+        requests = {event["payload"].get("step"): event for event in events
+                    if event["type"] == "model.request.started"}
+        for event in events:
+            if event["type"] == "model.response.received":
+                started = requests.get(event["payload"].get("step"))
+                if started:
+                    elapsed = int((_at(event) - _at(started)).total_seconds() * 1000)
+                    model_ms += elapsed
+                    model_calls.append({"step": event["payload"].get("step"), "latency_ms": elapsed,
+                                        "usage": event["payload"].get("usage", {})})
+        executions: dict[str, Any] = {}
+        for event in events:
+            if event["type"] == "tool.execution.started":
+                executions[event["payload"].get("call_id")] = event
+            elif event["type"] == "tool.execution.completed":
+                started = executions.pop(event["payload"].get("call_id"), None)
+                if started:
+                    elapsed = int((_at(event) - _at(started)).total_seconds() * 1000)
+                    tool_ms += elapsed
+                    tool_calls.append({"tool": event.get("tool"), "latency_ms": elapsed,
+                                       "status": event["status"]})
+        total_ms = int((_at(events[-1]) - _at(events[0])).total_seconds() * 1000) if len(events) > 1 else 0
+        cases = [case for case in self.guard_observer.cases.list_cases() if case["run_id"] == run_id]
+        return {
+            "trace_version": 1, "run_id": run_id, "run": self.agent_view(run),
+            "events": events, "evidence": self.store.list_evidence(run["goal_id"]),
+            "guard_cases": cases,
+            "metrics": {
+                "total_ms": total_ms, "model_ms": model_ms, "tool_ms": tool_ms,
+                "model_calls": model_calls, "tool_calls": tool_calls,
+                "steps": run["steps"], "tokens_used": run["tokens_used"],
+                "token_budget": run["token_budget"],
+                "denials": sum(1 for event in events if event["type"] == "aip.decision"
+                               and event["payload"].get("outcome") == "deny"),
+                "approvals": sum(1 for event in events if event["type"] == "tool.approval_required"),
+            },
+        }
 
     def snapshot(self, after: int = 0) -> dict[str, Any]:
         runs = self.store.list_runs()

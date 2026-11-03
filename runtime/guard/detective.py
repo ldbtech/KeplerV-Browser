@@ -5,11 +5,11 @@ import json
 from typing import Any
 from uuid import uuid4
 
-from pydantic import ValidationError
-
 from runtime.guard.case_manager import GuardCaseManager
-from runtime.guard.evidence import GuardEvidenceService
+from runtime.guard.evidence import GuardEvidenceService, bundle_size, trim_bundle_to_fit
+from runtime.guard.parsing import ModelOutputError, generate_valid_json
 from runtime.guard.schemas import DetectiveReport
+from runtime.guard.tools import GuardToolError, GuardTools
 from runtime.providers import ModelProviderError, ProviderRegistry
 from runtime.store import RuntimeStore
 
@@ -31,6 +31,7 @@ class GuardDetective:
         self.providers = providers
         self.cases = cases or GuardCaseManager(store)
         self.evidence = evidence or GuardEvidenceService(store, self.cases)
+        self.tools = GuardTools(store, providers, None, self.cases, self.evidence)
         self._case_locks: dict[str, asyncio.Lock] = {}
 
     def _model_route(self) -> tuple[str, str]:
@@ -40,25 +41,11 @@ class GuardDetective:
         return provider, model
 
     @staticmethod
-    def _bounded_bundle(bundle: dict[str, Any], limit: int) -> dict[str, Any]:
-        serialized = json.dumps(bundle, ensure_ascii=False, separators=(",", ":"))
-        while len(serialized) > limit and len(bundle["runtime_events"]) > 10:
-            bundle["runtime_events"] = bundle["runtime_events"][1:]
-            serialized = json.dumps(bundle, ensure_ascii=False, separators=(",", ":"))
-        if len(serialized) > limit:
+    def _bounded_bundle(bundle: dict[str, Any], limit: int, trigger_event_id: str | None = None) -> dict[str, Any]:
+        bundle = trim_bundle_to_fit(bundle, limit, trigger_event_id=trigger_event_id)
+        if bundle_size(bundle) > limit:
             raise GuardInvestigationError("The sanitized evidence bundle exceeds the Detective input budget.")
         return bundle
-
-    @staticmethod
-    def _parse_report(content: str) -> DetectiveReport:
-        candidate = content.strip()
-        if candidate.startswith("```"):
-            candidate = candidate.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        try:
-            value, _ = json.JSONDecoder().raw_decode(candidate)
-            return DetectiveReport.model_validate(value)
-        except (json.JSONDecodeError, ValidationError, TypeError) as exc:
-            raise GuardInvestigationError("The Detective response was not a valid evidence report; no findings were recorded.") from exc
 
     @staticmethod
     def _transition_if_needed(cases: GuardCaseManager, case_id: str, status: str, reason: str) -> dict[str, Any]:
@@ -98,44 +85,30 @@ class GuardDetective:
                 "This is an investigative report, not a final adjudication or containment authorization."
             )
             try:
-                bundle = self._bounded_bundle(self.evidence.reconstruct_case(case_id), self.MAX_INPUT_CHARS)
+                bundle = self._bounded_bundle(self.evidence.reconstruct_case(case_id), self.MAX_INPUT_CHARS,
+                                                     trigger_event_id=case["trigger_event_id"])
                 messages = [
                     {"role": "system", "content": system_message},
                     {"role": "user", "content": json.dumps(bundle, ensure_ascii=False, separators=(",", ":"))},
                 ]
                 adapter = self.providers.get(provider)
-                decision = await asyncio.wait_for(
-                    adapter.generate(model, messages, tools=[]),
-                    timeout=self.CALL_TIMEOUT_SECONDS,
-                )
-                if not decision.message:
-                    raise GuardInvestigationError("The Detective model returned no report text.")
-                report = self._parse_report(decision.message)
-                allowed_ids = {
-                    event["id"] for event in bundle["runtime_events"]
-                } | {
-                    item["id"] for item in bundle["case_evidence"]
-                } | {
-                    item["id"] for item in bundle["research_evidence"]
-                }
-                cited_ids = {evidence_id for finding in report.findings for evidence_id in finding.evidence_ids}
-                unknown_ids = cited_ids - allowed_ids
-                if unknown_ids:
-                    raise GuardInvestigationError("The Detective cited evidence IDs that were not supplied; its report was rejected.")
-                report_id = f"detective-report-{uuid4()}"
-                self.store.append_guard_evidence(case_id, "guard_report", report_id, self.cases.get_case(case_id)["updated_at"], {
-                    "interpretation": True, "provider": provider, "model": model,
-                    "usage": decision.usage, "report": report.model_dump(mode="json"),
-                    "source_evidence_ids": sorted(cited_ids),
-                })
+                try:
+                    report, usage = await generate_valid_json(
+                        adapter, model, messages, DetectiveReport.model_validate,
+                        timeout=self.CALL_TIMEOUT_SECONDS)
+                except ModelOutputError as exc:
+                    raise GuardInvestigationError("The Detective response was not a valid evidence report; no findings were recorded.") from exc
+                stored = self.tools.submit_findings(
+                    {"case_id": case_id, "report": report.model_dump(mode="json")},
+                    provider=provider, model=model, usage=usage)
                 self._transition_if_needed(self.cases, case_id, "evaluating", "The Detective produced a cited report for independent review.")
                 self._transition_if_needed(self.cases, case_id, "awaiting_human_review", "The report is ready for human review; no violation was automatically confirmed.")
                 return {
                     "case_id": case_id, "status": "awaiting_human_review",
                     "provider": provider, "model": model,
-                    "usage": decision.usage, "report": report.model_dump(mode="json"),
+                    "usage": usage, "report": stored["report"],
                 }
-            except (ModelProviderError, GuardInvestigationError, asyncio.TimeoutError, ValueError) as exc:
+            except (ModelProviderError, GuardInvestigationError, GuardToolError, asyncio.TimeoutError, ValueError) as exc:
                 message = str(exc) if not isinstance(exc, asyncio.TimeoutError) else "The Detective request timed out; no report was produced."
                 error_id = f"detective-error-{uuid4()}"
                 current = self.cases.get_case(case_id)
@@ -144,7 +117,10 @@ class GuardDetective:
                     "action": "detective_investigation_failed", "provider": provider,
                     "model": model, "error": message[:500],
                 })
-                current = self.cases.get_case(case_id)
-                if current and current["status"] == "investigating":
-                    self.cases.transition(case_id, "awaiting_evidence", "Detective report unavailable; retry after resolving the model error.", actor="guard_detective")
+                try:
+                    current = self.cases.get_case(case_id)
+                    if current and current["status"] == "investigating":
+                        self.cases.transition(case_id, "awaiting_evidence", "Detective report unavailable; retry after resolving the model error.", actor="guard_detective")
+                except ValueError:
+                    pass
                 raise GuardInvestigationError(message) from exc

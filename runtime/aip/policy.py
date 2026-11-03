@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import ipaddress
+import os
 import socket
 from urllib.parse import urlsplit
 
@@ -28,6 +29,24 @@ def _origin(url: str) -> tuple[str, str, int] | None:
         return parsed.scheme, parsed.hostname.lower().rstrip("."), port
     except ValueError:
         return None
+
+
+def demo_mode() -> bool:
+    return os.getenv("KEPLERV_DEMO_MODE") == "1"
+
+
+def is_demo_url(url: str | None) -> bool:
+    """Explicitly opted-in loopback fixture origins; never a public bypass."""
+    if not demo_mode() or not url:
+        return False
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+    return (parsed.scheme == "http"
+            and (parsed.hostname or "").lower() in {"127.0.0.1", "localhost"}
+            and not parsed.username and not parsed.password
+            and parsed.path.startswith("/demo/"))
 
 
 def is_public_host(host: str) -> bool:
@@ -82,11 +101,12 @@ def authorize_tool(
     target_url = arguments.get("url") if tool_name == "browser.navigate" else current_url
     if not target_url:
         return AIPDecision("deny", "Open the user-authorized page before using browser tools.")
+    demo_fixture = is_demo_url(target_url if isinstance(target_url, str) else None)
     target = _origin(target_url)
     allowed_origins = authorized_origins or ({authorized_origin} if authorized_origin else set())
-    if target is None or target not in allowed_origins:
+    if not demo_fixture and (target is None or target not in allowed_origins):
         return AIPDecision("deny", "Browser access is limited to HTTPS origins authorized by the user's web search or directly provided by the user.")
-    if not public_host_check(target[1]):
+    if not demo_fixture and target is not None and not public_host_check(target[1]):
         return AIPDecision("deny", "The target resolves to a non-public or unreachable host.")
     capability = "browser.read" if tool_name in READ_TOOLS else "browser.interact"
     if capability not in permissions:

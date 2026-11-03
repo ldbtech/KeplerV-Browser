@@ -1,0 +1,574 @@
+{
+  "trace_version": 1,
+  "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+  "run": {
+    "id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+    "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+    "parent_agent_id": null,
+    "goal_id": "goal-benchmark",
+    "goal_title": "Benchmark research",
+    "task": "Research the supplied article and report three findings.",
+    "provider": "meta",
+    "model": "muse-spark-1.3",
+    "status": "completed",
+    "permissions": [
+      "browser.read",
+      "browser.interact",
+      "delegate"
+    ],
+    "tools": [
+      "web.search",
+      "browser.navigate",
+      "browser.inspect",
+      "browser.extract_text",
+      "browser.screenshot",
+      "browser.click",
+      "browser.fill",
+      "agent.delegate"
+    ],
+    "step_budget": 16,
+    "token_budget": 50000,
+    "steps": 3,
+    "tokens_used": 7409,
+    "browser_isolated": false,
+    "error": null,
+    "created_at": "2026-11-03T13:20:34.578621+00:00",
+    "updated_at": "2026-11-03T13:20:47.931955+00:00",
+    "result": {
+      "summary": "{\"findings\": [{\"finding\": \"asyncio is a library for writing concurrent code with async/await syntax\", \"quote\": \"asyncio is a library to write concurrent code using the async/await syntax.\", \"source_url\": \"https://docs.python.org/3/library/asyncio.html\"}, {\"finding\": \"asyncio serves as foundation for high-performance async frameworks\", \"quote\": \"asyncio is used as a foundation for multiple Python asynchronous frameworks that provide high-performance network and web-servers, database connection libraries, distributed task queues, etc.\", \"source_url\": \"https://docs.python.org/3/library/asyncio.html\"}, {\"finding\": \"asyncio is well-suited for IO-bound and structured network code\", \"quote\": \"asyncio is often a perfect fit for IO-bound and high-level structured network code.\", \"source_url\": \"https://docs.python.org/3/library/asyncio.html\"}]}",
+      "findings": [
+        {
+          "id": "evidence-e73500a6-2472-4fd3-b324-1b7fd7535f58",
+          "goal_id": "goal-benchmark",
+          "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+          "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+          "finding": "asyncio is a library for writing concurrent code with async/await syntax",
+          "source_url": "https://docs.python.org/3/library/asyncio.html",
+          "quote": "asyncio is a library to write concurrent code using the async/await syntax.",
+          "created_at": "2026-11-03T13:20:47.917994+00:00"
+        },
+        {
+          "id": "evidence-7d0053d9-c297-429c-8eb9-34994c0f2d97",
+          "goal_id": "goal-benchmark",
+          "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+          "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+          "finding": "asyncio serves as foundation for high-performance async frameworks",
+          "source_url": "https://docs.python.org/3/library/asyncio.html",
+          "quote": "asyncio is used as a foundation for multiple Python asynchronous frameworks that provide high-performance network and web-servers, database connection libraries, distributed task queues, etc.",
+          "created_at": "2026-11-03T13:20:47.919990+00:00"
+        },
+        {
+          "id": "evidence-46abec0f-9c0c-4756-bdac-18c0c20b7438",
+          "goal_id": "goal-benchmark",
+          "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+          "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+          "finding": "asyncio is well-suited for IO-bound and structured network code",
+          "source_url": "https://docs.python.org/3/library/asyncio.html",
+          "quote": "asyncio is often a perfect fit for IO-bound and high-level structured network code.",
+          "created_at": "2026-11-03T13:20:47.921873+00:00"
+        }
+      ],
+      "source_url": "https://docs.python.org/3/library/asyncio.html",
+      "sources": [
+        "https://docs.python.org/3/library/asyncio.html"
+      ]
+    }
+  },
+  "events": [
+    {
+      "sequence": 1,
+      "id": "evt-84a8e8f4-d1f3-470a-b613-441e1514deaa",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "goal_id": "goal-benchmark",
+      "type": "agent.created",
+      "status": "success",
+      "tool": null,
+      "payload": {
+        "summary": "Muse research agent created",
+        "provider": "meta",
+        "model": "muse-spark-1.3"
+      },
+      "timestamp": "2026-11-03T13:20:34.580406+00:00"
+    },
+    {
+      "sequence": 2,
+      "id": "evt-0a5510c3-96dc-4014-a4a7-d9fe3e846d30",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "goal_id": "goal-benchmark",
+      "type": "goal.assigned",
+      "status": "success",
+      "tool": null,
+      "payload": {
+        "summary": "Research the supplied article and report three findings.",
+        "goal_title": "Benchmark research"
+      },
+      "timestamp": "2026-11-03T13:20:34.581265+00:00"
+    },
+    {
+      "sequence": 3,
+      "id": "evt-602e11cd-4ce8-447c-ada6-2c3bf4b3051a",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "goal_id": "goal-benchmark",
+      "type": "agent.started",
+      "status": "success",
+      "tool": null,
+      "payload": {
+        "summary": "Agent started its assigned research task"
+      },
+      "timestamp": "2026-11-03T13:20:34.584199+00:00"
+    },
+    {
+      "sequence": 4,
+      "id": "evt-b0fbe0f7-0280-473e-ae1d-1a5def8d9123",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "goal_id": "goal-benchmark",
+      "type": "model.request.started",
+      "status": "running",
+      "tool": null,
+      "payload": {
+        "provider": "meta",
+        "model": "muse-spark-1.3",
+        "step": 1
+      },
+      "timestamp": "2026-11-03T13:20:34.587679+00:00"
+    },
+    {
+      "sequence": 5,
+      "id": "evt-08d6677d-7303-4b2c-9e7e-36ec2ba4ee1f",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "goal_id": "goal-benchmark",
+      "type": "model.response.received",
+      "status": "success",
+      "tool": null,
+      "payload": {
+        "step": 1,
+        "usage": {
+          "completion_tokens": 258,
+          "prompt_tokens": 1343,
+          "total_tokens": 1601,
+          "completion_tokens_details": {
+            "reasoning_tokens": 173
+          },
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      },
+      "timestamp": "2026-11-03T13:20:37.778498+00:00"
+    },
+    {
+      "sequence": 6,
+      "id": "evt-146d14d0-d864-473f-8cc6-2371d441baf1",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "goal_id": "goal-benchmark",
+      "type": "tool.proposed",
+      "status": "pending",
+      "tool": "browser.navigate",
+      "payload": {
+        "call_id": "call_9a12474d-e6af-47b9-ad6d-a2a3968764bd",
+        "arguments": {
+          "url": "https://docs.python.org/3/library/asyncio.html"
+        }
+      },
+      "timestamp": "2026-11-03T13:20:37.784077+00:00"
+    },
+    {
+      "sequence": 7,
+      "id": "evt-c844f4ef-b675-44d8-aade-5910e850295a",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "goal_id": "goal-benchmark",
+      "type": "aip.decision",
+      "status": "allowed",
+      "tool": "browser.navigate",
+      "payload": {
+        "call_id": "call_9a12474d-e6af-47b9-ad6d-a2a3968764bd",
+        "outcome": "allow",
+        "reason": "Agent, goal, capability, and authorized origin are valid."
+      },
+      "timestamp": "2026-11-03T13:20:37.846643+00:00"
+    },
+    {
+      "sequence": 8,
+      "id": "evt-ea1dba13-6b3f-476f-8b90-9c0a6b9ec6ce",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "goal_id": "goal-benchmark",
+      "type": "tool.execution.started",
+      "status": "running",
+      "tool": "browser.navigate",
+      "payload": {
+        "call_id": "call_9a12474d-e6af-47b9-ad6d-a2a3968764bd"
+      },
+      "timestamp": "2026-11-03T13:20:37.850161+00:00"
+    },
+    {
+      "sequence": 9,
+      "id": "evt-e4e4f83f-baa8-4201-ae10-8aebb2b655c0",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "goal_id": "goal-benchmark",
+      "type": "tool.execution.completed",
+      "status": "success",
+      "tool": "browser.navigate",
+      "payload": {
+        "call_id": "call_9a12474d-e6af-47b9-ad6d-a2a3968764bd",
+        "summary": "browser.navigate completed"
+      },
+      "timestamp": "2026-11-03T13:20:39.922022+00:00"
+    },
+    {
+      "sequence": 10,
+      "id": "evt-eb0993b9-1169-4334-9988-b6cc110efbc1",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "goal_id": "goal-benchmark",
+      "type": "model.request.started",
+      "status": "running",
+      "tool": null,
+      "payload": {
+        "provider": "meta",
+        "model": "muse-spark-1.3",
+        "step": 2
+      },
+      "timestamp": "2026-11-03T13:20:39.926468+00:00"
+    },
+    {
+      "sequence": 11,
+      "id": "evt-1a2079c2-479c-44ca-ab08-d4ab56c79e1d",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "goal_id": "goal-benchmark",
+      "type": "model.response.received",
+      "status": "success",
+      "tool": null,
+      "payload": {
+        "step": 2,
+        "usage": {
+          "completion_tokens": 175,
+          "prompt_tokens": 2039,
+          "total_tokens": 2214,
+          "completion_tokens_details": {
+            "reasoning_tokens": 101
+          },
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      },
+      "timestamp": "2026-11-03T13:20:42.796213+00:00"
+    },
+    {
+      "sequence": 12,
+      "id": "evt-45bfc3cd-1b93-4dec-8ada-88830c9a7c89",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "goal_id": "goal-benchmark",
+      "type": "tool.proposed",
+      "status": "pending",
+      "tool": "browser.extract_text",
+      "payload": {
+        "call_id": "call_f2fd5a11-d498-409c-b175-f5d195953193",
+        "arguments": {
+          "max_chars": 3500
+        }
+      },
+      "timestamp": "2026-11-03T13:20:42.801723+00:00"
+    },
+    {
+      "sequence": 13,
+      "id": "evt-b7a6636e-38a6-4d0c-8df9-2c61ae2cc051",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "goal_id": "goal-benchmark",
+      "type": "aip.decision",
+      "status": "allowed",
+      "tool": "browser.extract_text",
+      "payload": {
+        "call_id": "call_f2fd5a11-d498-409c-b175-f5d195953193",
+        "outcome": "allow",
+        "reason": "Agent, goal, capability, and authorized origin are valid."
+      },
+      "timestamp": "2026-11-03T13:20:42.809220+00:00"
+    },
+    {
+      "sequence": 14,
+      "id": "evt-3498d7f3-7e40-4534-97ee-24462bd8960b",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "goal_id": "goal-benchmark",
+      "type": "tool.execution.started",
+      "status": "running",
+      "tool": "browser.extract_text",
+      "payload": {
+        "call_id": "call_f2fd5a11-d498-409c-b175-f5d195953193"
+      },
+      "timestamp": "2026-11-03T13:20:42.812503+00:00"
+    },
+    {
+      "sequence": 15,
+      "id": "evt-b53d3870-ec96-4e4c-b69f-145d185d430b",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "goal_id": "goal-benchmark",
+      "type": "tool.execution.completed",
+      "status": "success",
+      "tool": "browser.extract_text",
+      "payload": {
+        "call_id": "call_f2fd5a11-d498-409c-b175-f5d195953193",
+        "summary": "browser.extract_text completed"
+      },
+      "timestamp": "2026-11-03T13:20:42.820654+00:00"
+    },
+    {
+      "sequence": 16,
+      "id": "evt-cd30a4a3-aa6e-46e0-bdfd-2770098cded5",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "goal_id": "goal-benchmark",
+      "type": "model.request.started",
+      "status": "running",
+      "tool": null,
+      "payload": {
+        "provider": "meta",
+        "model": "muse-spark-1.3",
+        "step": 3
+      },
+      "timestamp": "2026-11-03T13:20:42.828619+00:00"
+    },
+    {
+      "sequence": 17,
+      "id": "evt-93987e60-8b7d-4676-8824-174ffa2885a6",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "goal_id": "goal-benchmark",
+      "type": "model.response.received",
+      "status": "success",
+      "tool": null,
+      "payload": {
+        "step": 3,
+        "usage": {
+          "completion_tokens": 479,
+          "prompt_tokens": 3115,
+          "total_tokens": 3594,
+          "completion_tokens_details": {
+            "reasoning_tokens": 285
+          },
+          "prompt_tokens_details": {
+            "cached_tokens": 2033
+          }
+        }
+      },
+      "timestamp": "2026-11-03T13:20:47.913366+00:00"
+    },
+    {
+      "sequence": 18,
+      "id": "evt-6b449469-a9f7-4866-8448-d6df0c0a6a5d",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "goal_id": "goal-benchmark",
+      "type": "evidence.created",
+      "status": "success",
+      "tool": null,
+      "payload": {
+        "summary": "asyncio is a library for writing concurrent code with async/await syntax",
+        "source_url": "https://docs.python.org/3/library/asyncio.html",
+        "evidence_id": "evidence-e73500a6-2472-4fd3-b324-1b7fd7535f58"
+      },
+      "timestamp": "2026-11-03T13:20:47.924865+00:00"
+    },
+    {
+      "sequence": 19,
+      "id": "evt-b33ea11b-9ff5-4e58-b229-43ea3f54746c",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "goal_id": "goal-benchmark",
+      "type": "evidence.created",
+      "status": "success",
+      "tool": null,
+      "payload": {
+        "summary": "asyncio serves as foundation for high-performance async frameworks",
+        "source_url": "https://docs.python.org/3/library/asyncio.html",
+        "evidence_id": "evidence-7d0053d9-c297-429c-8eb9-34994c0f2d97"
+      },
+      "timestamp": "2026-11-03T13:20:47.927772+00:00"
+    },
+    {
+      "sequence": 20,
+      "id": "evt-002201e8-825a-405a-bd31-fa86c80d7336",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "goal_id": "goal-benchmark",
+      "type": "evidence.created",
+      "status": "success",
+      "tool": null,
+      "payload": {
+        "summary": "asyncio is well-suited for IO-bound and structured network code",
+        "source_url": "https://docs.python.org/3/library/asyncio.html",
+        "evidence_id": "evidence-46abec0f-9c0c-4756-bdac-18c0c20b7438"
+      },
+      "timestamp": "2026-11-03T13:20:47.930449+00:00"
+    },
+    {
+      "sequence": 21,
+      "id": "evt-4d0e9b05-1b56-4d41-ab5e-551a92e778a3",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "goal_id": "goal-benchmark",
+      "type": "agent.completed",
+      "status": "success",
+      "tool": null,
+      "payload": {
+        "summary": "Research completed with three source-checked findings",
+        "result": {
+          "summary": "{\"findings\": [{\"finding\": \"asyncio is a library for writing concurrent code with async/await syntax\", \"quote\": \"asyncio is a library to write concurrent code using the async/await syntax.\", \"source_url\": \"https://docs.python.org/3/library/asyncio.html\"}, {\"finding\": \"asyncio serves as foundation for high-performance async frameworks\", \"quote\": \"asyncio is used as a foundation for multiple Python asynchronous frameworks that provide high-performance network and web-servers, database connection libraries, distributed task queues, etc.\", \"source_url\": \"https://docs.python.org/3/library/asyncio.html\"}, {\"finding\": \"asyncio is well-suited for IO-bound and structured network code\", \"quote\": \"asyncio is often a perfect fit for IO-bound and high-level structured network code.\", \"source_url\": \"https://docs.python.org/3/library/asyncio.html\"}]}",
+          "findings": [
+            {
+              "id": "evidence-e73500a6-2472-4fd3-b324-1b7fd7535f58",
+              "goal_id": "goal-benchmark",
+              "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+              "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+              "finding": "asyncio is a library for writing concurrent code with async/await syntax",
+              "source_url": "https://docs.python.org/3/library/asyncio.html",
+              "quote": "asyncio is a library to write concurrent code using the async/await syntax.",
+              "created_at": "2026-11-03T13:20:47.917994+00:00"
+            },
+            {
+              "id": "evidence-7d0053d9-c297-429c-8eb9-34994c0f2d97",
+              "goal_id": "goal-benchmark",
+              "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+              "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+              "finding": "asyncio serves as foundation for high-performance async frameworks",
+              "source_url": "https://docs.python.org/3/library/asyncio.html",
+              "quote": "asyncio is used as a foundation for multiple Python asynchronous frameworks that provide high-performance network and web-servers, database connection libraries, distributed task queues, etc.",
+              "created_at": "2026-11-03T13:20:47.919990+00:00"
+            },
+            {
+              "id": "evidence-46abec0f-9c0c-4756-bdac-18c0c20b7438",
+              "goal_id": "goal-benchmark",
+              "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+              "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+              "finding": "asyncio is well-suited for IO-bound and structured network code",
+              "source_url": "https://docs.python.org/3/library/asyncio.html",
+              "quote": "asyncio is often a perfect fit for IO-bound and high-level structured network code.",
+              "created_at": "2026-11-03T13:20:47.921873+00:00"
+            }
+          ],
+          "source_url": "https://docs.python.org/3/library/asyncio.html",
+          "sources": [
+            "https://docs.python.org/3/library/asyncio.html"
+          ]
+        }
+      },
+      "timestamp": "2026-11-03T13:20:47.934666+00:00"
+    }
+  ],
+  "evidence": [
+    {
+      "id": "evidence-46abec0f-9c0c-4756-bdac-18c0c20b7438",
+      "goal_id": "goal-benchmark",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "finding": "asyncio is well-suited for IO-bound and structured network code",
+      "source_url": "https://docs.python.org/3/library/asyncio.html",
+      "quote": "asyncio is often a perfect fit for IO-bound and high-level structured network code.",
+      "created_at": "2026-11-03T13:20:47.921873+00:00"
+    },
+    {
+      "id": "evidence-7d0053d9-c297-429c-8eb9-34994c0f2d97",
+      "goal_id": "goal-benchmark",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "finding": "asyncio serves as foundation for high-performance async frameworks",
+      "source_url": "https://docs.python.org/3/library/asyncio.html",
+      "quote": "asyncio is used as a foundation for multiple Python asynchronous frameworks that provide high-performance network and web-servers, database connection libraries, distributed task queues, etc.",
+      "created_at": "2026-11-03T13:20:47.919990+00:00"
+    },
+    {
+      "id": "evidence-e73500a6-2472-4fd3-b324-1b7fd7535f58",
+      "goal_id": "goal-benchmark",
+      "agent_id": "agent-315320b2-4fd5-4b9b-b9e3-b7b81142cf9b",
+      "run_id": "run-0b88e2b4-6c06-42d3-9223-cecb7980c7f1",
+      "finding": "asyncio is a library for writing concurrent code with async/await syntax",
+      "source_url": "https://docs.python.org/3/library/asyncio.html",
+      "quote": "asyncio is a library to write concurrent code using the async/await syntax.",
+      "created_at": "2026-11-03T13:20:47.917994+00:00"
+    }
+  ],
+  "guard_cases": [],
+  "metrics": {
+    "total_ms": 13354,
+    "model_ms": 11143,
+    "tool_ms": 2079,
+    "model_calls": [
+      {
+        "step": 1,
+        "latency_ms": 3190,
+        "usage": {
+          "completion_tokens": 258,
+          "prompt_tokens": 1343,
+          "total_tokens": 1601,
+          "completion_tokens_details": {
+            "reasoning_tokens": 173
+          },
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      },
+      {
+        "step": 2,
+        "latency_ms": 2869,
+        "usage": {
+          "completion_tokens": 175,
+          "prompt_tokens": 2039,
+          "total_tokens": 2214,
+          "completion_tokens_details": {
+            "reasoning_tokens": 101
+          },
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      },
+      {
+        "step": 3,
+        "latency_ms": 5084,
+        "usage": {
+          "completion_tokens": 479,
+          "prompt_tokens": 3115,
+          "total_tokens": 3594,
+          "completion_tokens_details": {
+            "reasoning_tokens": 285
+          },
+          "prompt_tokens_details": {
+            "cached_tokens": 2033
+          }
+        }
+      }
+    ],
+    "tool_calls": [
+      {
+        "tool": "browser.navigate",
+        "latency_ms": 2071,
+        "status": "success"
+      },
+      {
+        "tool": "browser.extract_text",
+        "latency_ms": 8,
+        "status": "success"
+      }
+    ],
+    "steps": 3,
+    "tokens_used": 7409,
+    "token_budget": 50000,
+    "denials": 0,
+    "approvals": 0
+  }
+}

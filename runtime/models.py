@@ -40,8 +40,11 @@ class RunRequest(StrictModel):
     @field_validator("source_url")
     @classmethod
     def require_public_https_origin(cls, value: HttpUrl | None) -> HttpUrl | None:
+        from runtime.aip.policy import is_demo_url
         if value is None:
             return None
+        if is_demo_url(str(value)):
+            return value
         if value.scheme != "https" or value.port not in (None, 443) or value.username or value.password:
             raise ValueError("The research source must be a credential-free HTTPS URL on the standard port.")
         return value

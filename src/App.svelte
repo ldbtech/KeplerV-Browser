@@ -4,9 +4,12 @@
   import { listen } from "@tauri-apps/api/event";
   import type { Agent, AppState, Evidence, Goal, KeplerEvent, Resource } from "./types";
   import { initialState, makeId, STORAGE_KEY } from "./simulation/seed";
-  import { addTask, advanceSimulationClock, appendEvent, auditAction, canSpawn, createAgent, createGoal, setOfflineMode, spawnSubagent, transitionAgent } from "./simulation/runtime";
+  import { addTask, advanceSimulationClock, appendEvent, auditAction, canSpawn, createAgent, createGoal, modifyGoal, setOfflineMode, spawnSubagent, transitionAgent } from "./simulation/runtime";
+  import { VoiceRecorder } from "./voice/recorder";
+  import { VoiceSpeech } from "./voice/speech";
+  import { arrayBufferToBase64 } from "./voice/wav";
 
-  type Presence = "resting" | "listening" | "processing" | "coordinating" | "authorization" | "investigating" | "unavailable";
+  type Presence = "resting" | "listening" | "processing" | "speaking" | "coordinating" | "authorization" | "investigating" | "unavailable";
   type IntentStep = "idle" | "listening" | "captured" | "interpreting" | "intent_ready" | "unavailable";
   type PlanPhase = "idle" | "running" | "complete";
   type TextSize = "standard" | "large" | "extra-large";
@@ -15,7 +18,7 @@
   type RuntimeEvent = { id: string; sequence: number; run_id: string; agent_id: string; goal_id: string; type: string; status: string; tool?: string; payload: Record<string, unknown>; timestamp: string };
   type RuntimeDetectiveReport = { summary: string; assessment: string; findings: Array<{ claim: string; classification: string; evidence_ids: string[]; explanation: string }>; uncertainties: string[]; recommended_next_step: string };
   type RuntimeGuardCase = { id: string; trigger_event_id: string; run_id: string; goal_id: string; goal_title: string; agent_id: string; provider: string; model: string; status: string; severity: string; signal: string; summary: string; created_at: string; updated_at: string; evidence: Array<{ id: string; source_type: string; source_id: string; timestamp: string; payload: Record<string, unknown>; previous_hash: string; integrity_hash: string }>; transitions: Array<{ from_status: string; to_status: string; reason: string; actor: string; timestamp: string }> };
-  type RuntimeAgent = { id: string; agent_id: string; parent_agent_id?: string | null; goal_id: string; goal_title: string; task: string; provider: string; model: string; status: string; permissions: string[]; step_budget: number; token_budget: number; steps: number; tokens_used: number; error?: string | null; created_at: string; updated_at: string; result?: { summary?: string; findings?: Array<{ id: string; finding: string; quote: string; source_url: string; created_at: string }>; source_url?: string } | null };
+  type RuntimeAgent = { id: string; agent_id: string; parent_agent_id?: string | null; goal_id: string; goal_title: string; task: string; provider: string; model: string; status: string; permissions: string[]; step_budget: number; token_budget: number; steps: number; tokens_used: number; browser_isolated?: boolean; error?: string | null; created_at: string; updated_at: string; result?: { summary?: string; findings?: Array<{ id: string; finding: string; quote: string; source_url: string; created_at: string }>; source_url?: string } | null };
   type RuntimeSnapshot = { agents: RuntimeAgent[]; events: RuntimeEvent[]; evidence: Array<{ id: string; goal_id: string; agent_id: string; run_id: string; finding: string; source_url: string; quote: string; created_at: string }>; guard_cases: RuntimeGuardCase[]; last_sequence: number };
   type Selection = { kind: "goal" | "agent" | "resource"; id: string } | null;
 
@@ -29,6 +32,8 @@
   let runtimeModelConfigured = false;
   let startingRuntimeRun = false;
   let runtimeTokenBudget = 50000;
+  let runtimeSourceUrl = "";
+  let runtimeBaseUrl = "";
   let pendingRuntimeApprovals: Array<{ runId: string; callId: string; goalId: string; tool: string; arguments: Record<string, unknown> }> = [];
   let runtimeGuardCases: RuntimeGuardCase[] = [];
   let selectedGuardCaseId = "";
@@ -79,6 +84,16 @@
   let audioStream: MediaStream | null = null;
   let audioContext: AudioContext | null = null;
   let audioRequestId = 0;
+  let voiceRecorder: VoiceRecorder | null = null;
+  let voiceTranscript = "";
+  let voiceResult = "";
+  let voiceConversation: Array<{ role: string; text: string }> = [];
+  let speech: VoiceSpeech | null = null;
+  let speechEnabled = true;
+  const announcedCompletions = new Set<string>();
+  const announcedCases = new Set<string>();
+  const announcedApprovals = new Set<string>();
+  let snapshotPrimed = false;
   let themeMedia: MediaQueryList | null = null;
   let animationFrame = 0;
   let toastTimer: ReturnType<typeof setTimeout>;
@@ -123,6 +138,12 @@
             provider: ["Local simulation", "OpenAI · simulated"].includes(agent.provider) ? "On device" : agent.provider,
             model: ["Deterministic", "Provider label only"].includes(agent.model) ? (agent.name === "Planner" ? "Course Planner" : "Researcher") : agent.model,
           })),
+          goals: (savedState.goals ?? initialState.goals).map((goal) => ({
+            ...goal,
+            tasks: goal.tasks ?? [],
+            criteria: goal.criteria ?? ["Outcome reviewed against the request"],
+            constraints: goal.constraints ?? [],
+          })),
           events: (savedState.events ?? []).filter((event) => typeof event.payload?.runId === "string").map((event) => ({
             ...event,
             ...(typeof event.payload.summary === "string" ? { payload: { ...event.payload, summary: cleanWorkspaceCopy(event.payload.summary) } } : {}),
@@ -141,6 +162,7 @@
       if (savedSimpleMode !== null) simpleMode = savedSimpleMode !== "false";
     } catch { showNotice("Saved workspace data could not be read. Starting with a fresh workspace."); }
     hydrated = true;
+    speechEnabled = voice().isEnabled;
     applyTheme();
     void invoke<{ connected: string[]; meta_configured: boolean; meta_credential_saved?: boolean; active_provider?: string; active_model?: string; chatgpt_connected?: boolean; chatgpt_email?: string | null; chatgpt_sharing?: boolean }>("credential_status").then((result) => {
       connectedCredentials = result.connected;
@@ -164,6 +186,7 @@
       return invoke<RuntimeSnapshot>("runtime_snapshot");
     }).then((snapshot) => {
       syncRuntimeSnapshot(snapshot);
+      void invoke<{ base_url: string }>("runtime_info").then((info) => { runtimeBaseUrl = info.base_url; }).catch(() => {});
       runtimeSyncTimer = setInterval(() => {
         void invoke<RuntimeSnapshot>("runtime_snapshot").then(syncRuntimeSnapshot).catch(() => { runtimeStatus = "unavailable"; });
       }, 1400);
@@ -339,7 +362,7 @@
   }
   function mapRuntimeAgent(item: RuntimeAgent): Agent {
     const providerName = item.provider === "meta" ? "Meta Muse" : item.provider === "chatgpt" ? "ChatGPT" : item.provider;
-    return { id: item.agent_id, name: item.parent_agent_id ? "Research subagent" : item.provider === "meta" ? "Muse researcher" : `${providerName} researcher`, provider: providerName, model: item.model, ...(item.parent_agent_id ? { parentAgentId: item.parent_agent_id } : {}), goalId: item.goal_id, status: mapRuntimeStatus(item.status), permissions: item.permissions, capabilities: item.permissions, currentTask: item.task, createdAt: item.created_at, steps: item.steps, error: item.error, runtime: true, runId: item.id };
+    return { id: item.agent_id, name: item.parent_agent_id ? "Research subagent" : item.provider === "meta" ? "Muse researcher" : `${providerName} researcher`, provider: providerName, model: item.model, ...(item.parent_agent_id ? { parentAgentId: item.parent_agent_id } : {}), goalId: item.goal_id, status: mapRuntimeStatus(item.status), permissions: item.permissions, capabilities: item.permissions, currentTask: item.task, createdAt: item.created_at, steps: item.steps, error: item.error, runtime: true, runId: item.id, browserIsolated: Boolean(item.browser_isolated) };
   }
   function runtimeEventSummary(event: RuntimeEvent): string {
     const detail = event.payload.summary ?? event.payload.reason ?? event.payload.message;
@@ -367,16 +390,44 @@
     for (const event of events) {
       const callId = String(event.payload.call_id ?? "");
       if (event.type === "tool.approval_required" && callId) {
-        if (!pendingRuntimeApprovals.some((item) => item.runId === event.run_id && item.callId === callId)) pendingRuntimeApprovals = [...pendingRuntimeApprovals, { runId: event.run_id, callId, goalId: event.goal_id, tool: event.tool ?? "browser interaction", arguments: (event.payload.arguments as Record<string, unknown>) ?? {} }];
+        if (!pendingRuntimeApprovals.some((item) => item.runId === event.run_id && item.callId === callId)) {
+          pendingRuntimeApprovals = [...pendingRuntimeApprovals, { runId: event.run_id, callId, goalId: event.goal_id, tool: event.tool ?? "browser interaction", arguments: (event.payload.arguments as Record<string, unknown>) ?? {} }];
+          const approvalKey = `${event.run_id}:${callId}`;
+          if (!announcedApprovals.has(approvalKey)) {
+            announcedApprovals.add(approvalKey);
+            const goalTitle = goals.find((goal) => goal.id === event.goal_id)?.title ?? "your goal";
+            say(`The research agent on ${goalTitle} wants to run ${event.tool ?? "a page action"}. Your decision is needed in the goal panel.`);
+          }
+        }
       }
       if (["agent.stopped", "agent.failed"].includes(event.type)) pendingRuntimeApprovals = pendingRuntimeApprovals.filter((item) => item.runId !== event.run_id);
       else if (["tool.approval_denied", "tool.execution.started"].includes(event.type) && callId) pendingRuntimeApprovals = pendingRuntimeApprovals.filter((item) => !(item.runId === event.run_id && item.callId === callId));
     }
   }
   function syncRuntimeSnapshot(snapshot: RuntimeSnapshot) {
+    if (!snapshotPrimed) {
+      snapshotPrimed = true;
+      for (const guardCase of snapshot.guard_cases ?? []) announcedCases.add(guardCase.id);
+      for (const agent of snapshot.agents ?? []) if (agent.status === "completed") announcedCompletions.add(agent.agent_id);
+    }
+    for (const guardCase of snapshot.guard_cases ?? []) {
+      if (!announcedCases.has(guardCase.id) && guardCase.status !== "closed") {
+        announcedCases.add(guardCase.id);
+        say(`Guard opened an investigation on ${guardCase.goal_title}. Ask me why if you want the evidence.`);
+      }
+    }
     runtimeGuardCases = snapshot.guard_cases ?? [];
     if (selectedGuardCaseId && !runtimeGuardCases.some((item) => item.id === selectedGuardCaseId)) selectedGuardCaseId = "";
+    const previous = new Map(state.agents.filter((item) => item.runtime).map((item) => [item.id, item.status]));
     const runtimeAgents = (snapshot.agents ?? []).map(mapRuntimeAgent);
+    for (const agent of runtimeAgents) {
+      if (agent.status === "completed" && previous.has(agent.id) && previous.get(agent.id) !== "completed" && !announcedCompletions.has(agent.id)) {
+        announcedCompletions.add(agent.id);
+        const goalTitle = goals.find((goal) => goal.id === agent.goalId)?.title ?? "your goal";
+        const findings = (snapshot.evidence ?? []).filter((item) => item.run_id === agent.runId).length;
+        say(`Research for ${goalTitle} is complete with ${findings} findings. ${goalTitle} is ready to review.`);
+      }
+    }
     const byAgentId = new Map(runtimeAgents.map((item) => [item.id, item]));
     const agents = [...runtimeAgents, ...state.agents.filter((item) => !item.runtime && !byAgentId.has(item.id))];
     const evidence: Evidence[] = (snapshot.evidence ?? []).map((item) => ({ id: item.id, goalId: item.goal_id, agentId: item.agent_id, runId: item.run_id, finding: item.finding, sourceUrl: item.source_url, quote: item.quote, createdAt: item.created_at }));
@@ -395,7 +446,7 @@
     }
     startingRuntimeRun = true;
     try {
-      const run = await invoke<RuntimeAgent>("runtime_create_run", { goalId: activeGoal.id, goalTitle: activeGoal.title, goalDescription: activeGoal.description, task: "Search the public web for relevant sources, inspect the most useful pages, and summarize three findings with exact supporting quotes and source links.", sourceUrl: null, tokenBudget: runtimeTokenBudget });
+      const run = await invoke<RuntimeAgent>("runtime_create_run", { goalId: activeGoal.id, goalTitle: activeGoal.title, goalDescription: activeGoal.description, task: "Search the public web for relevant sources, inspect the most useful pages, and summarize three findings with exact supporting quotes and source links.", sourceUrl: runtimeSourceUrl.trim() || null, tokenBudget: runtimeTokenBudget });
       const agent = mapRuntimeAgent(run);
       state = { ...state, agents: [agent, ...state.agents.filter((item) => item.id !== agent.id)] };
       showNotice("Muse research agent started. Its real actions will appear in activity.");
@@ -455,14 +506,21 @@
       void invoke<RuntimeSnapshot>("runtime_snapshot").then(syncRuntimeSnapshot).catch(() => {});
     } finally { adjudicatingCaseId = ""; }
   }
-  async function applyGuardContainment(caseId: string, action: "pause_agent" | "resume_agent") {
-    if (!window.confirm(action === "pause_agent"
-      ? "Pause the affected agent at its next safe step? KeplerV will record this user-authorized action in the case."
-      : "Resume the affected agent? KeplerV will record this user-authorized action in the case.")) return;
+  type ContainmentAction = "pause_agent" | "resume_agent" | "deny_pending" | "revoke_capability" | "isolate_browser" | "restore_browser";
+  async function applyGuardContainment(caseId: string, action: ContainmentAction, capability?: string) {
+    const prompts: Record<ContainmentAction, string> = {
+      pause_agent: "Pause the affected agent at its next safe step? KeplerV will record this user-authorized action in the case.",
+      resume_agent: "Resume the affected agent? KeplerV will record this user-authorized action in the case.",
+      deny_pending: "Deny every pending page action for this agent and pause it? KeplerV will record this user-authorized action in the case.",
+      revoke_capability: `Revoke the ${capability} capability from this agent? Later actions needing it will be denied. KeplerV will record this user-authorized action in the case.`,
+      isolate_browser: "Isolate this agent's browser session? Open pages close and later browser actions are denied until restored. KeplerV will record this user-authorized action in the case.",
+      restore_browser: "Restore this agent's browser session? KeplerV will record this user-authorized action in the case.",
+    };
+    if (!window.confirm(prompts[action])) return;
     try {
       const result = await invoke<{ agent_status: string }>("runtime_guard_containment", {
-        caseId, action,
-        reason: action === "pause_agent" ? "User approved pause after reviewing this Guard case." : "User approved resuming the agent after reviewing this Guard case.",
+        caseId, action, capability: capability ?? null,
+        reason: `User approved ${action}${capability ? ` (${capability})` : ""} after reviewing this Guard case.`,
       });
       showNotice(`Agent ${result.agent_status} · action recorded in Guard case`);
       const snapshot = await invoke<RuntimeSnapshot>("runtime_snapshot");
@@ -558,32 +616,36 @@
   function eventLabel(event: KeplerEvent) { return cleanWorkspaceCopy(String(event.payload.summary ?? event.type.replaceAll("_", " "))); }
   function eventTypeLabel(event: KeplerEvent) { return event.type === "simulation_clock_advanced" ? "workspace clock advanced" : event.type.replaceAll("_", " "); }
 
+  function voice(): VoiceSpeech {
+    if (!speech) speech = new VoiceSpeech({ onState: (speaking) => {
+      if (speaking === "speaking") presence = "speaking";
+      else if (presence === "speaking") presence = "resting";
+    } });
+    return speech;
+  }
+  function say(text: string): void { voice().announce(text); }
+  function pushVoiceTurn(role: string, text: string): void {
+    voiceConversation = [...voiceConversation.slice(-7), { role, text: text.slice(0, 500) }];
+  }
+
   async function startAudio() {
     const requestId = ++audioRequestId;
-    micError = "";
-    intentStep = "listening"; presence = "listening"; audioPhase = 0;
+    micError = ""; voiceTranscript = ""; voiceResult = "";
+    voice().interrupt();
+    intentStep = "listening"; presence = "listening"; audioPhase = 0; micLevel = 0;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: false });
-      if (requestId !== audioRequestId) { stream.getTracks().forEach((track) => track.stop()); return; }
-      audioStream = stream;
-      audioContext = new AudioContext();
-      const source = audioContext.createMediaStreamSource(audioStream);
-      const analyser = audioContext.createAnalyser(); analyser.fftSize = 256; source.connect(analyser);
-      const data = new Uint8Array(analyser.frequencyBinCount);
-      const sample = () => {
-        if (!audioStream || !audioContext) return;
-        analyser.getByteTimeDomainData(data);
-        let total = 0; for (const value of data) { const centered = (value - 128) / 128; total += centered * centered; }
-        micLevel = Math.min(1, Math.sqrt(total / data.length) * 3.2);
-        audioPhase += 0.003 + micLevel * 0.11;
-        animationFrame = requestAnimationFrame(sample);
-      };
-      sample();
+      const recorder = new VoiceRecorder({ onLevel: (level) => { micLevel = level; audioPhase += 0.003 + level * 0.11; } });
+      voiceRecorder = recorder;
+      const done = recorder.run();
+      audioStream = await recorder.start();
+      if (requestId !== audioRequestId) { recorder.cancel(); return; }
+      const wav = await done;
+      voiceRecorder = null; audioStream = null; micLevel = 0;
+      if (requestId !== audioRequestId || !wav) return;
+      await processVoiceRecording(wav, requestId);
     } catch (error) {
       if (requestId !== audioRequestId) return;
-      audioStream?.getTracks().forEach((track) => track.stop()); audioStream = null;
-      if (audioContext) await audioContext.close().catch(() => {}); audioContext = null;
-      micLevel = 0;
+      voiceRecorder = null; audioStream = null; micLevel = 0;
       micError = error instanceof Error ? error.message : "Microphone access was denied or is unavailable.";
       presence = "unavailable"; intentStep = "unavailable";
     }
@@ -592,22 +654,219 @@
   async function stopAudio() {
     audioRequestId += 1;
     cancelAnimationFrame(animationFrame);
-    audioStream?.getTracks().forEach((track) => track.stop()); audioStream = null;
-    if (audioContext) await audioContext.close().catch(() => {}); audioContext = null; micLevel = 0;
-    if (intentStep === "listening") { intentStep = "captured"; presence = "processing"; }
+    voiceRecorder?.cancel(); voiceRecorder = null;
+    audioStream = null; micLevel = 0;
   }
-  function cancelIntent() { audioRequestId += 1; void stopAudio(); intentStep = "idle"; presence = "resting"; micError = ""; }
-  async function interpretIntent() {
+  function finishCapture() { voiceRecorder?.stop(); }
+  function cancelIntent() { void stopAudio(); intentStep = "idle"; presence = "resting"; micError = ""; }
+
+  async function processVoiceRecording(wav: ArrayBuffer, requestId: number) {
     intentStep = "interpreting"; presence = "processing";
-    await new Promise((resolve) => setTimeout(resolve, 550));
-    intentStep = "intent_ready"; presence = "resting";
+    try {
+      const result = await invoke<{ transcript: string; duration_ms: number }>("transcribe_audio", { audioB64: arrayBufferToBase64(wav) });
+      if (requestId !== audioRequestId) return;
+      voiceTranscript = result.transcript; chosenIntent = result.transcript;
+      pushVoiceTurn("user", result.transcript);
+      await dispatchVoiceCommand(result.transcript, requestId);
+    } catch (error) {
+      if (requestId !== audioRequestId) return;
+      micError = error instanceof Error ? error.message : String(error);
+      presence = "unavailable"; intentStep = "unavailable";
+    }
   }
-  function createGoalFromIntent() {
-    const title = chosenIntent.includes("enrollment") ? "Prepare for spring enrollment" : chosenIntent.includes("transit") ? "Plan a Montreal weekend" : "Research coastal adaptation";
-    const next = createGoal(state, title, chosenIntent);
-    const goal = next.goals[0];
-    commit(next); selected = { kind: "goal", id: goal.id }; panel = "goal"; intentStep = "idle";
-    showNotice("Goal created and saved on this device.");
+
+  async function interpretIntent() {
+    if (!chosenIntent.trim()) return;
+    intentStep = "interpreting"; presence = "processing";
+    pushVoiceTurn("user", chosenIntent);
+    await dispatchVoiceCommand(chosenIntent, audioRequestId);
+  }
+
+  type VoiceIntent = { type: string; target_id?: string | null; args: Record<string, unknown>; ambiguous: boolean; needs_clarification: boolean; clarification_question?: string | null; permission: string; summary_for_speech: string };
+
+  function buildVoiceContext() {
+    return {
+      goals: goals.slice(0, 40).map((goal) => ({ id: goal.id, title: goal.title, description: goal.description })),
+      agents: agents.slice(0, 80).map((agent) => ({ id: agent.id, name: agent.name, goalId: agent.goalId, status: agent.status })),
+      evidence: state.evidence.slice(0, 120).map((item, index) => ({ id: item.id, goalId: item.goalId, finding: item.finding, position: index + 1 })),
+      resources: state.resources.slice(0, 120).map((item) => ({ id: item.id, goalId: item.goalId, label: item.label, url: item.url })),
+      approvals: [...pendingRuntimeApprovals.map((item) => ({ id: `${item.runId}:${item.callId}`, goalId: item.goalId, action: item.tool })), ...(state.approval && state.approval.status === "pending" ? [{ id: state.approval.id, goalId: state.approval.goalId, action: state.approval.action }] : [])].slice(0, 20),
+      cases: runtimeGuardCases.slice(0, 40).map((item) => ({ id: item.id, goal_title: item.goal_title, status: item.status, signal: item.signal })),
+      selection: { ...(selected ? { kind: selected.kind, id: selected.id } : {}), panel },
+      recent_events: state.events.slice(0, 8).map(eventLabel),
+      conversation: voiceConversation.slice(-8),
+    };
+  }
+
+  async function dispatchVoiceCommand(transcript: string, requestId: number) {
+    try {
+      const intent = await invoke<VoiceIntent>("interpret_voice", { transcript, context: buildVoiceContext() });
+      if (requestId !== audioRequestId) return;
+      const spoken = await executeVoiceIntent(intent, transcript);
+      pushVoiceTurn("kepler", spoken);
+      say(spoken);
+      voiceResult = spoken;
+      intentStep = "intent_ready"; presence = "resting";
+    } catch (error) {
+      if (requestId !== audioRequestId) return;
+      const message = error instanceof Error ? error.message : String(error);
+      voiceResult = message; intentStep = "intent_ready"; presence = "resting";
+      showNotice(message);
+    }
+  }
+
+  function findVoiceTarget(intent: VoiceIntent) {
+    const id = intent.target_id ?? undefined;
+    return {
+      goal: id ? goals.find((item) => item.id === id) : undefined,
+      agent: id ? agents.find((item) => item.id === id) : undefined,
+      evidence: id ? state.evidence.find((item) => item.id === id) : undefined,
+      resource: id ? state.resources.find((item) => item.id === id) : undefined,
+      approval: id ? pendingRuntimeApprovals.find((item) => `${item.runId}:${item.callId}` === id) : undefined,
+      localApproval: id && state.approval?.id === id && state.approval.status === "pending" ? state.approval : undefined,
+      guardCase: id ? runtimeGuardCases.find((item) => item.id === id) : undefined,
+    };
+  }
+
+  function describeGoalStatus(goal: Goal): string {
+    const helpers = agents.filter((agent) => agent.goalId === goal.id);
+    const findings = state.evidence.filter((item) => item.goalId === goal.id).length;
+    const pending = pendingRuntimeApprovals.filter((item) => item.goalId === goal.id).length;
+    const openCases = runtimeGuardCases.filter((item) => item.goal_id === goal.id && item.status !== "closed").length;
+    return `${goal.title} is ${goal.progress}% complete with ${helpers.length} agents and ${findings} findings.`
+      + (pending ? ` ${pending} actions await your decision.` : "") + (openCases ? ` ${openCases} Guard investigations are open.` : "");
+  }
+
+  function explainGuardCase(guardCase: RuntimeGuardCase): string {
+    const report = guardCase.evidence.find((item) => item.source_type === "guard_adjudication")?.payload as { report?: { summary?: string; disposition?: string } } | undefined;
+    const detective = guardCase.evidence.find((item) => item.source_type === "guard_report")?.payload as { report?: { summary?: string } } | undefined;
+    const turns = guardCase.evidence.filter((item) => item.source_type === "guard_interview_turn").length;
+    const summary = report?.report?.summary ?? detective?.report?.summary ?? guardCase.summary;
+    return `Guard case on ${guardCase.goal_title}: ${guardCase.signal.replaceAll("_", " ")}, status ${guardCase.status.replaceAll("_", " ")}.`
+      + ` ${summary} ${turns} interview questions asked.`
+      + (report?.report?.disposition ? ` Disposition: ${report.report.disposition.replaceAll("_", " ")}.` : " No independent disposition yet.");
+  }
+
+  async function executeVoiceIntent(intent: VoiceIntent, transcript: string): Promise<string> {
+    if (intent.needs_clarification) return intent.clarification_question || intent.summary_for_speech;
+    const target = findVoiceTarget(intent);
+    const argText = (name: string): string | undefined => {
+      const value = intent.args[name];
+      return typeof value === "string" && value.trim() ? value.slice(0, 500) : undefined;
+    };
+    switch (intent.type) {
+      case "CREATE_GOAL": {
+        const title = (argText("title") ?? transcript.split(/[.!?]/)[0].trim().slice(0, 64)) || "New intention";
+        const description = argText("description") ?? transcript;
+        const next = createGoal(state, title, description);
+        const goal = next.goals[0];
+        commit(next); selected = { kind: "goal", id: goal.id }; panel = "goal";
+        if (intent.args.start_research === true) {
+          if (!runtimeModelConfigured) return `I created ${title}, but Muse is not connected, so research cannot start yet.`;
+          await startMuseResearch();
+          return `I created ${title} and started a Muse research agent. I will speak up when findings arrive.`;
+        }
+        return `I created the goal ${title}.`;
+      }
+      case "MODIFY_GOAL": {
+        const goal = target.goal ?? activeGoal;
+        if (!goal) return "Which goal should I change?";
+        const patch = { title: argText("title"), description: argText("description"), addTask: argText("add_task"), addCriterion: argText("add_criterion"), addConstraint: argText("add_constraint") };
+        if (!patch.title && !patch.description && !patch.addTask && !patch.addCriterion && !patch.addConstraint) return `What should change about ${goal.title}?`;
+        commit(modifyGoal(state, goal.id, patch));
+        selected = { kind: "goal", id: goal.id }; panel = "goal";
+        return `Updated ${goal.title}.`;
+      }
+      case "START_AGENT": {
+        const goal = target.goal ?? activeGoal;
+        if (!goal) return "Which goal should I research?";
+        if (!runtimeModelConfigured) return "Muse is not connected, so I cannot start research yet.";
+        selected = { kind: "goal", id: goal.id }; panel = "goal";
+        await startMuseResearch();
+        return `Starting a research agent for ${goal.title}.`;
+      }
+      case "PAUSE_AGENT":
+      case "RESUME_AGENT":
+      case "STOP_AGENT": {
+        const action = intent.type === "PAUSE_AGENT" ? "pause" : intent.type === "RESUME_AGENT" ? "resume" : "stop";
+        const agent = target.agent ?? (activeAgent?.status === "working" || activeAgent?.status === "paused" ? activeAgent : agents.find((item) => item.status === "working"));
+        if (!agent) return "I could not find a running agent to control.";
+        if (agent.runtime && agent.runId) await controlRuntimeAgent(agent, action);
+        else commit(transitionAgent(state, agent.id, action));
+        return `${agent.name} ${action === "pause" ? "paused" : action === "resume" ? "resumed" : "stopped"}.`;
+      }
+      case "GET_STATUS": {
+        if (target.agent) {
+          selected = { kind: "agent", id: target.agent.id }; panel = "agent";
+          return `${target.agent.name} is ${target.agent.status}. ${target.agent.currentTask ?? "No active task."}`;
+        }
+        const goal = target.goal ?? activeGoal;
+        if (goal) {
+          selected = { kind: "goal", id: goal.id }; panel = "goal";
+          return describeGoalStatus(goal);
+        }
+        return `${goals.length} goals, ${agents.filter((item) => item.status === "working").length} working agents, ${state.evidence.length} findings.`;
+      }
+      case "INSPECT_RESOURCE": {
+        if (!target.resource) return "Which link should I open?";
+        selected = { kind: "resource", id: target.resource.id }; panel = null; resourceView = true;
+        return `Opening ${target.resource.label}.`;
+      }
+      case "SHOW_EVIDENCE": {
+        const item = target.evidence ?? (activeEvidence.length === 1 ? activeEvidence[0] : undefined);
+        if (!item) return activeEvidence.length ? "Which finding should I show?" : "There are no findings yet.";
+        const resource = state.resources.find((entry) => entry.goalId === item.goalId && entry.url === item.sourceUrl);
+        if (resource) { selected = { kind: "resource", id: resource.id }; panel = null; resourceView = true; }
+        return `Showing: ${item.finding}`;
+      }
+      case "OPEN_INVESTIGATION": {
+        const guardCase = target.guardCase ?? (runtimeGuardCases.length === 1 ? runtimeGuardCases[0] : undefined);
+        if (!guardCase) return runtimeGuardCases.length ? "Which investigation should I open?" : "No Guard investigations are open.";
+        panel = "guard"; currentMenu = "guard"; selectedGuardCaseId = guardCase.id;
+        return `Opening the investigation on ${guardCase.goal_title}.`;
+      }
+      case "REQUEST_EXPLANATION": {
+        const guardCase = target.guardCase ?? (runtimeGuardCases.length === 1 ? runtimeGuardCases[0] : undefined);
+        if (guardCase) {
+          panel = "guard"; currentMenu = "guard"; selectedGuardCaseId = guardCase.id;
+          return explainGuardCase(guardCase);
+        }
+        const agent = target.agent;
+        if (agent?.error) return `${agent.name} reported: ${agent.error}`;
+        if (agent) return `${agent.name} is ${agent.status} on ${goals.find((goal) => goal.id === agent.goalId)?.title ?? "its goal"}.`;
+        return "I found no investigation or agent problem to explain.";
+      }
+      case "REQUEST_APPROVAL_DETAILS": {
+        const pending = target.approval ?? (pendingRuntimeApprovals.length === 1 ? pendingRuntimeApprovals[0] : undefined);
+        if (pending) {
+          const goal = goals.find((item) => item.id === pending.goalId);
+          if (goal) { selected = { kind: "goal", id: goal.id }; panel = "goal"; }
+          return `The research agent wants to run ${pending.tool}. I opened the request in the goal panel. Approve or deny it there.`;
+        }
+        if (target.localApproval ?? (state.approval?.status === "pending" ? state.approval : undefined)) { panel = "approval"; return "I opened the pending approval. Confirm your decision in the panel."; }
+        return "No actions are waiting for approval.";
+      }
+      case "APPROVE_ACTION":
+      case "DENY_ACTION": {
+        const pending = target.approval ?? (pendingRuntimeApprovals.length === 1 ? pendingRuntimeApprovals[0] : undefined);
+        const verb = intent.type === "APPROVE_ACTION" ? "approve" : "deny";
+        if (pending) {
+          const goal = goals.find((item) => item.id === pending.goalId);
+          if (goal) { selected = { kind: "goal", id: goal.id }; panel = "goal"; }
+          return `I opened the ${pending.tool} request. To stay safe I never ${verb} by voice alone, so confirm it in the goal panel.`;
+        }
+        if (state.approval?.status === "pending") { panel = "approval"; return `I opened the payment approval. Confirm ${verb} in the panel.`; }
+        return "Nothing is waiting for approval.";
+      }
+      case "CHANGE_APPEARANCE": {
+        const theme = argText("theme");
+        if (theme !== "light" && theme !== "dark" && theme !== "system") return "Which appearance: light, dark, or automatic?";
+        commit({ ...state, theme }); applyTheme();
+        return `Appearance set to ${theme === "system" ? "automatic" : theme}.`;
+      }
+      default:
+        return intent.summary_for_speech;
+    }
   }
   function submitGoal(event: SubmitEvent) {
     event.preventDefault(); if (!newDescription.trim()) return;
@@ -756,23 +1015,23 @@
           <h2>{intentStep === "listening" ? "Speak your intention." : intentStep === "captured" ? "Voice input ended." : intentStep === "interpreting" ? "Finding the shape of it." : intentStep === "unavailable" ? "Audio is unavailable." : "Review your intention."}</h2>
           <p>{intentStep === "listening" ? "KeplerV is listening on this device. The field responds to your voice; no recording is saved." : intentStep === "captured" ? "The microphone is off. Choose an example transcript to continue." : intentStep === "interpreting" ? "Organizing the selected intention and preparing its goal." : intentStep === "unavailable" ? "KeplerV could not access the microphone. Check macOS privacy settings, then try again." : "Review this intention before adding it to your graph."}</p>
         </div>
-        <div class="audio-particle-field" class:particles-active={intentStep === "listening"} aria-hidden="true"><div class="particle-grid"></div><div class="particle-orbit particle-orbit-one"></div><div class="particle-orbit particle-orbit-two"></div><div class="particle-orbit particle-orbit-three"></div>{#each audioParticles as particle}<i class={`audio-particle ${particle.tone}`} style={particleStyle(particle, audioPhase, micLevel)}></i>{/each}<div class="audio-core"><span class="audio-core-halo" style={`transform:scale(${1 + micLevel * 0.35});box-shadow:0 0 ${18 + micLevel * 55}px color-mix(in srgb,var(--accent),transparent ${94 - micLevel * 32}%)`}></span><span class="audio-core-center"></span><small>{intentStep === "listening" ? "LIVE VOICE" : intentStep === "unavailable" ? "NO INPUT" : "KEPLERV"}</small></div></div>
+        <div class="audio-particle-field" class:particles-active={intentStep === "listening"} aria-hidden="true"><div class="particle-grid"></div><div class="particle-orbit particle-orbit-one"></div><div class="particle-orbit particle-orbit-two"></div><div class="particle-orbit particle-orbit-three"></div>{#each audioParticles as particle}<i class={`audio-particle ${particle.tone}`} style={particleStyle(particle, audioPhase, micLevel)}></i>{/each}<div class="audio-core"><span class="audio-core-halo" style={`transform:scale(${1 + micLevel * 0.35});box-shadow:0 0 ${18 + micLevel * 55}px color-mix(in srgb,var(--accent),transparent ${94 - micLevel * 32}%)`}></span><span class="audio-core-center"></span><small>{intentStep === "listening" ? "LIVE VOICE" : intentStep === "unavailable" ? "NO INPUT" : presence === "speaking" ? "SPEAKING" : intentStep === "interpreting" ? "THINKING" : "KEPLERV"}</small></div></div>
         <div class="audio-level-wrap"><div class="audio-level-caption"><span>INPUT LEVEL <b>{intentStep === "listening" ? "LIVE" : "INACTIVE"}</b></span><span>{Math.round(micLevel * 100)}%</span></div><div class="audio-meter" role="meter" aria-label="Live microphone level" aria-valuenow={Math.round(micLevel * 100)} aria-valuemin="0" aria-valuemax="100">{#each Array.from({ length: 38 }) as _, index}<i style={meterStyle(index, micLevel, audioPhase)}></i>{/each}</div></div>
         <div class="audio-controls">
-          {#if intentStep === "listening"}<button class="audio-primary" onclick={() => void stopAudio()}>Finish capture <span>■</span></button><button class="audio-cancel" onclick={cancelIntent}>Cancel</button>
-          {:else if intentStep === "captured"}<label class="audio-select-label" for="example-intent">EXAMPLE TRANSCRIPT</label><select id="example-intent" bind:value={chosenIntent}>{#each intents as intent}<option value={intent}>{intent}</option>{/each}</select><button class="audio-primary" onclick={interpretIntent}>Continue with this intention <span>↗</span></button><button class="audio-cancel" onclick={cancelIntent}>Cancel</button>
-          {:else if intentStep === "interpreting"}<div class="audio-working"><i></i><i></i><i></i><i></i><i></i><i></i><span>PREPARING INTENTION</span></div><button class="audio-cancel" onclick={cancelIntent}>Cancel</button>
-          {:else if intentStep === "unavailable"}<p class="audio-error">{micError}</p><button class="audio-primary" onclick={openAudio}>Try microphone again <span>↗</span></button><button class="audio-cancel" onclick={cancelIntent}>Close</button>
-          {:else}<div class="audio-result"><span>YOUR INTENTION</span><p>“{chosenIntent}”</p></div><button class="audio-primary" onclick={createGoalFromIntent}>Add intention to graph <span>↗</span></button><button class="audio-cancel" onclick={cancelIntent}>Cancel</button>{/if}
+          {#if intentStep === "listening"}<button class="audio-primary" onclick={finishCapture}>Finish capture <span>■</span></button><button class="audio-cancel" onclick={cancelIntent}>Cancel</button>
+          {:else if intentStep === "captured"}<label class="audio-select-label" for="example-intent">EXAMPLE TRANSCRIPT · FALLBACK WHEN LIVE TRANSCRIPTION IS UNAVAILABLE</label><select id="example-intent" bind:value={chosenIntent}>{#each intents as intent}<option value={intent}>{intent}</option>{/each}</select><button class="audio-primary" onclick={interpretIntent}>Continue with this intention <span>↗</span></button><button class="audio-cancel" onclick={cancelIntent}>Cancel</button>
+          {:else if intentStep === "interpreting"}<div class="audio-working"><i></i><i></i><i></i><i></i><i></i><i></i><span>TRANSCRIBING · UNDERSTANDING REQUEST</span></div><button class="audio-cancel" onclick={cancelIntent}>Cancel</button>
+          {:else if intentStep === "unavailable"}<p class="audio-error">{micError}</p><button class="audio-primary" onclick={openAudio}>Try microphone again <span>↗</span></button><button class="audio-primary" onclick={() => { intentStep = "captured"; presence = "resting"; }}>Use an example transcript instead</button><button class="audio-cancel" onclick={cancelIntent}>Close</button>
+          {:else}<div class="audio-result"><span>YOUR INTENTION</span><p>“{voiceTranscript || chosenIntent}”</p><span>KEPLERV RESPONSE</span><p>{voiceResult || "Ready."}</p></div><button class="audio-primary" onclick={cancelIntent}>Done <span>↗</span></button><button class="audio-cancel" onclick={openAudio}>Speak again</button>{/if}
         </div>
       </div>
-      <footer class="audio-footer"><span><i></i> MICROPHONE INPUT · ON DEVICE</span><span>EXAMPLE TRANSCRIPTS AVAILABLE</span><span>NO AUDIO SAVED</span></footer>
+      <footer class="audio-footer"><span><i></i> MICROPHONE INPUT · LIVE META TRANSCRIPTION</span><span>EXAMPLES ARE A FALLBACK ONLY</span><span>NO AUDIO SAVED</span></footer>
     </div>
   {/if}
 
   {#if panel}<button class="scrim" aria-label="Dismiss contextual surface" onclick={closePanel}></button><div class="context-panel" role="dialog" aria-modal="true" tabindex="-1">
     <div class="panel-heading"><div><span class="panel-kicker">WORKSPACE</span><h2>{panel === "settings" ? "Accessibility & settings" : panel === "providers" ? "LLM providers" : panel === "timeline" ? "Recent activity" : panel === "create_goal" ? "New goal" : panel === "resource" ? "Add a link" : panel === "resource_detail" ? "Link details" : panel === "goal" ? "Goal details" : panel === "agent" ? "Helper details" : panel === "guard" ? "Guard cases" : "Approval needed"}</h2></div>{#if panel === "agent"}<button class="panel-back" onclick={closePanel}>← <span>Back to workspace</span></button>{:else}<button class="panel-close" aria-label="Close" onclick={closePanel}>×</button>{/if}</div>
-    {#if panel === "settings"}<div class="settings-block"><p>Text size</p><span class="subtle">Choose a size that feels comfortable. It applies across KeplerV.</span><div class="segmented">{#each [{ id: "standard", label: "Standard" }, { id: "large", label: "Large" }, { id: "extra-large", label: "Extra large" }] as size}<button class:segment-active={textSize === size.id} aria-pressed={textSize === size.id} onclick={() => textSize = size.id as TextSize}>{size.label}</button>{/each}</div></div><div class="settings-block"><p>Simple workspace</p><span class="subtle">Show the main actions first. Turn this off to see extra details.</span><button class="accessibility-toggle" role="switch" aria-checked={simpleMode} onclick={() => simpleMode = !simpleMode}><span>{simpleMode ? "On" : "Off"}</span><b>{simpleMode ? "Fewer details" : "Show all details"}</b></button></div><div class="settings-block"><p>Movement</p><span class="subtle">Reduce animations across the workspace.</span><button class="accessibility-toggle" role="switch" aria-checked={reduceMotion} onclick={() => reduceMotion = !reduceMotion}><span>{reduceMotion ? "On" : "Off"}</span><b>Reduce motion</b></button></div><div class="settings-block"><p>Appearance</p><span class="subtle">Choose a light, dark, or automatic theme.</span><div class="segmented">{#each ["system", "light", "dark"] as theme}<button class:segment-active={state.theme === theme} aria-pressed={state.theme === theme} onclick={() => commit({ ...state, theme: theme as AppState["theme"] })}>{theme === "system" ? "Automatic" : theme[0].toUpperCase() + theme.slice(1)}</button>{/each}</div></div><div class="settings-block"><p>Workspace</p><span class="subtle">Goals and activity are saved on this device.</span><button class="secondary-wide" onclick={clearWorkspace}>Reset workspace</button></div>
+    {#if panel === "settings"}<div class="settings-block"><p>Text size</p><span class="subtle">Choose a size that feels comfortable. It applies across KeplerV.</span><div class="segmented">{#each [{ id: "standard", label: "Standard" }, { id: "large", label: "Large" }, { id: "extra-large", label: "Extra large" }] as size}<button class:segment-active={textSize === size.id} aria-pressed={textSize === size.id} onclick={() => textSize = size.id as TextSize}>{size.label}</button>{/each}</div></div><div class="settings-block"><p>Simple workspace</p><span class="subtle">Show the main actions first. Turn this off to see extra details.</span><button class="accessibility-toggle" role="switch" aria-checked={simpleMode} onclick={() => simpleMode = !simpleMode}><span>{simpleMode ? "On" : "Off"}</span><b>{simpleMode ? "Fewer details" : "Show all details"}</b></button></div><div class="settings-block"><p>Movement</p><span class="subtle">Reduce animations across the workspace.</span><button class="accessibility-toggle" role="switch" aria-checked={reduceMotion} onclick={() => reduceMotion = !reduceMotion}><span>{reduceMotion ? "On" : "Off"}</span><b>Reduce motion</b></button></div><div class="settings-block"><p>Appearance</p><span class="subtle">Choose a light, dark, or automatic theme.</span><div class="segmented">{#each ["system", "light", "dark"] as theme}<button class:segment-active={state.theme === theme} aria-pressed={state.theme === theme} onclick={() => commit({ ...state, theme: theme as AppState["theme"] })}>{theme === "system" ? "Automatic" : theme[0].toUpperCase() + theme.slice(1)}</button>{/each}</div></div><div class="settings-block"><p>Spoken responses</p><span class="subtle">KeplerV speaks confirmations, approvals, and completion summaries using system voices.</span><button class="accessibility-toggle" role="switch" aria-checked={speechEnabled} onclick={() => { speechEnabled = !speechEnabled; voice().setEnabled(speechEnabled); }}><span>{speechEnabled ? "On" : "Off"}</span><b>Speak responses</b></button></div><div class="settings-block"><p>Workspace</p><span class="subtle">Goals and activity are saved on this device.</span><button class="secondary-wide" onclick={clearWorkspace}>Reset workspace</button></div>
     {:else if panel === "providers"}<div class="provider-panel-intro"><p>Connect an AI provider once. KeplerV keeps credentials in your device’s protected credential store.</p><small>Each provider needs its own approved connection method. Local models can connect without an account.</small></div>
       <section class="provider-connect-card"><div class="provider-card-top"><span class="provider-avatar">✦</span><div><b>Meta Muse</b><small>Used by KeplerV research agents</small></div><span class="connection-state">{metaConnected ? activeProvider === "meta" ? "CONNECTED · ACTIVE" : "CONNECTED" : "NOT CONNECTED"}</span></div>{#if metaConnected}<p class="provider-connect-note">Connected securely on this device.{activeProvider === "meta" ? " Research is using Meta Muse." : ""}</p><div class="provider-connect-actions">{#if activeProvider !== "meta"}<button class="provider-default" onclick={() => activateProviderConnection("meta")}>Use for research</button>{/if}<button class="provider-default" onclick={() => removeCredential("meta")}>Disconnect</button></div>{:else}<form class="provider-form" onsubmit={saveMetaCredential}><label>API KEY<input bind:value={metaApiKey} type="password" autocomplete="off" placeholder="Paste your Meta API key" required /></label><button class="object-primary" type="submit" disabled={savingCredential}>{savingCredential ? "Connecting…" : "Connect Meta Muse"}</button></form><small class="provider-security-note">The key is sent to KeplerV’s native runtime and saved in your system keychain. It is not stored with your workspace data.</small>{/if}</section>
       <section class="provider-connect-card"><div class="provider-card-top"><span class="provider-avatar">◉</span><div><b>ChatGPT</b><small>Sign in with your ChatGPT account</small></div><span class="connection-state">{connectingChatgpt ? "WAITING FOR SIGN-IN" : chatgptConnected ? chatgptSharing ? "PLAN CONNECTED" : "ACCOUNT CONNECTED" : "NOT CONNECTED"}</span></div>{#if connectingChatgpt}<div class="chatgpt-progress" role="status" aria-live="polite"><span class="chatgpt-progress-dot"></span><div><b>Finish sign-in in KeplerV</b><small>Your sign-in page is open in a KeplerV window. Approve access there; this workspace will finish connecting automatically.</small></div></div>{/if}{#if chatgptConnected}<p class="provider-connect-note">{chatgptEmail || "ChatGPT account"}{chatgptSharing ? " · ChatGPT plan usage is authorized." : " · Plan usage was not authorized."}</p><div class="provider-connect-actions">{#if chatgptSharing && activeProvider !== "chatgpt"}<button class="provider-default" onclick={() => activateProviderConnection("chatgpt")}>Use for research</button>{/if}<button class="provider-default" onclick={connectChatGPT} disabled={connectingChatgpt}>{connectingChatgpt ? "Opening sign-in…" : "Reconnect"}</button><button class="provider-default" onclick={disconnectChatGPT}>Disconnect</button></div>{:else}<p class="provider-connect-note">ChatGPT sign-in opens in a KeplerV window. Your login stays inside the app; KeplerV will confirm when account verification and setup are complete.</p><button class="object-primary" onclick={connectChatGPT} disabled={connectingChatgpt}>{connectingChatgpt ? "Waiting for ChatGPT…" : "Continue with ChatGPT"}</button>{/if}{#if chatgptConnectError}<p class="chatgpt-connect-error" role="alert">{chatgptConnectError}</p>{/if}<small class="provider-security-note">Tokens are stored in the system keychain. KeplerV requests access only to perform eligible model requests; it cannot read your ChatGPT conversations.</small></section>
@@ -780,7 +1039,7 @@
       {#if connectedCredentials.some((provider) => !["meta", "chatgpt"].includes(provider))}<section class="provider-saved-list"><h3>Connected providers</h3>{#each connectedCredentials.filter((provider) => !["meta", "chatgpt"].includes(provider)) as provider}<article><div><b>{provider === "local-ollama" ? "Ollama" : provider === "local-lmstudio" ? "LM Studio" : provider === "local-openai-compatible" ? "Local model" : provider === "openai-compatible" ? "Custom OpenAI-compatible" : provider[0].toUpperCase() + provider.slice(1)}</b><small>{activeProvider === provider ? `Active · ${activeModel}` : "Connected on this device"}</small></div><div><button class="provider-default" disabled={activeProvider === provider} onclick={() => activateProviderConnection(provider)}>{activeProvider === provider ? "Active" : "Use for research"}</button><button class="provider-remove" aria-label={`Disconnect ${provider}`} onclick={() => removeCredential(provider)}>×</button></div></article>{/each}</section>{/if}
       <p class="provider-footnote">You can connect several providers here. The active provider and model are shown above; connecting another provider switches research to it.</p>
     {:else if panel === "create_goal"}<form class="context-form" onsubmit={submitGoal}><label>WHAT WOULD YOU LIKE TO DO?<textarea class="intent-entry" bind:value={newDescription} rows="12" placeholder="Describe what you want KeplerV to help with." required></textarea></label><button class="object-primary" type="submit">＋ Add goal</button><p class="subtle">Your goal appears on the graph. Open it to start web research with Muse.</p></form>
-    {:else if panel === "goal" && activeGoal}<div class="goal-inspector"><div class="goal-inspector-state"><span>{activeGoal.status.toUpperCase()}</span><b>{activeGoal.progress}%</b></div><h3>{activeGoal.title}</h3><p>{activeGoal.description}</p><section class="runtime-research"><h3>Research with Muse</h3><p>KeplerV searches the public web from this goal, opens relevant pages in its research browser, and returns source-backed findings for you to review.</p><label for="runtime-token-budget">MAXIMUM TOKEN BUDGET<input id="runtime-token-budget" bind:value={runtimeTokenBudget} type="number" min="1000" max="50000" step="1000" /></label><small class="subtle">1,000–50,000 tokens per run. Higher limits can increase model usage and provider charges.</small>{#if !runtimeModelConfigured}{#if state.offlineMode}<small class="subtle">Offline mode — goals, tasks, and local helpers stay available. Research resumes when Muse connects.</small><button class="secondary-wide" onclick={() => { commit(setOfflineMode(state, false)); showNotice("Online research re-enabled."); }}>Exit offline mode</button>{:else}<small class="runtime-key-help">Connect Meta Muse in LLM providers to use research.</small><button class="secondary-wide" onclick={() => { commit(setOfflineMode(state, true)); showNotice("Offline workspace active. Nothing here will be presented as live research."); }}>Continue offline</button>{/if}{/if}{#if runtimeError}<small class="runtime-error">{runtimeError}</small>{/if}<button class="object-primary" disabled={runtimeStatus !== "ready" || !runtimeModelConfigured || startingRuntimeRun || !Number.isInteger(runtimeTokenBudget) || runtimeTokenBudget < 1000 || runtimeTokenBudget > 50000} onclick={startMuseResearch}>{startingRuntimeRun ? "Starting Muse…" : runtimeStatus !== "ready" ? "Runtime unavailable" : runtimeModelConfigured ? "Search the web with Muse" : "Connect Muse first"}</button></section>{#if activeRuntimeAgents.length}<div class="runtime-agent-list"><div class="task-heading"><h3>Muse agents</h3><span>{activeRuntimeAgents.length}</span></div>{#each activeRuntimeAgents as runtimeAgent}<button class="runtime-agent-row" onclick={() => { selected = { kind: "agent", id: runtimeAgent.id }; panel = "agent"; }}><span class:runtime-failed={runtimeAgent.status === "failed"} class:runtime-done={runtimeAgent.status === "completed"}>{runtimeAgent.status === "completed" ? "✓" : runtimeAgent.status === "failed" ? "!" : "◌"}</span><span><b>{runtimeAgent.name}</b><small>{runtimeAgent.status.toUpperCase()} · {runtimeAgent.steps} steps · {runtimeAgent.model}</small></span><i>Open ›</i></button>{/each}</div>{/if}{#if activePendingApprovals.length}<div class="runtime-approval-list"><h3>Review requested actions</h3>{#each activePendingApprovals as approval}<article><b>{approval.tool}</b><small>The agent is paused until you approve or deny this page action.</small><div><button onclick={() => resolveRuntimeApproval(approval, "approve")}>Approve once</button><button onclick={() => resolveRuntimeApproval(approval, "deny")}>Deny</button></div></article>{/each}</div>{/if}{#if activeEvidence.length}<div class="runtime-evidence"><div class="task-heading"><h3>Research findings</h3><span>{activeEvidence.length}</span></div>{#each activeEvidence as item}<article><b>{item.finding}</b><blockquote>“{item.quote}”</blockquote><button onclick={() => openEvidenceSource(item)}>Open source ↗</button></article>{/each}</div>{/if}{#if isUbResearchIntent(`${activeGoal.title} ${activeGoal.description}`)}<div class="intent-next-step"><span>{completedPlanGoalIds.includes(activeGoal.id) ? "RESEARCH PLAN READY" : "RESEARCH PLAN STARTS AUTOMATICALLY"}</span>{#if completedPlanGoalIds.includes(activeGoal.id)}<p>This intention has already gone through the planning steps. Open its schedule draft without running them again.</p><button class="object-primary" onclick={() => openSchedulePreview(activeGoal.id)}>Open schedule PDF <span>↗</span></button>{:else}<p>Adding this intention starts the planning steps automatically. You won’t need to run them from here.</p>{/if}</div>{/if}<div class="inspector-block technical-detail"><span>DEPENDENCY CHAIN</span><b>Intent → tasks → agent work → human review</b><small>Each task below belongs to this goal. Delegated agents inherit the goal boundary.</small></div><div class="task-list"><div class="task-heading"><h3>Related tasks</h3><span>{activeGoal.tasks.length.toString().padStart(2, "0")}</span></div>{#each activeGoal.tasks as task, index}<div class="task-row"><span>{String(index + 1).padStart(2, "0")}</span><b>{task}</b><i>{goalTaskStatus(activeGoal, index)}</i></div>{/each}</div><form class="context-form task-form" onsubmit={addGoalTask}><label>ADD A RELATED TASK<input bind:value={newTask} maxlength="90" placeholder="A concrete next step" required /></label><button class="secondary-wide" type="submit">＋ Add task</button></form><button class="object-primary" onclick={assignAgent}>Assign agent</button><div class="inspector-block goal-history"><span>RECENT ACTIVITY FOR THIS GOAL</span>{#each state.events.filter((event) => event.goalId === activeGoal.id).slice(0, 5) as event}<small>{new Date(event.timestamp).toLocaleTimeString()} · {eventLabel(event)}</small>{/each}</div></div>
+    {:else if panel === "goal" && activeGoal}<div class="goal-inspector"><div class="goal-inspector-state"><span>{activeGoal.status.toUpperCase()}</span><b>{activeGoal.progress}%</b></div><h3>{activeGoal.title}</h3><p>{activeGoal.description}</p><section class="runtime-research"><h3>Research with Muse</h3><p>KeplerV searches the public web from this goal, opens relevant pages in its research browser, and returns source-backed findings for you to review.</p><label for="runtime-token-budget">MAXIMUM TOKEN BUDGET<input id="runtime-token-budget" bind:value={runtimeTokenBudget} type="number" min="1000" max="50000" step="1000" /></label><small class="subtle">1,000–50,000 tokens per run. Higher limits can increase model usage and provider charges.</small><label for="runtime-source-url">START PAGE (OPTIONAL)<input id="runtime-source-url" bind:value={runtimeSourceUrl} type="url" placeholder="https://… or loopback demo fixture" /></label><small class="subtle">Leave blank to start from web search. Loopback fixture pages work only with demo mode enabled.</small>{#if runtimeBaseUrl}<button class="secondary-wide" onclick={() => { runtimeSourceUrl = `${runtimeBaseUrl}/demo/university/catalog`; showNotice("Start page set to the fictional university catalog."); }}>Use fictional demo fixtures</button>{/if}{#if !runtimeModelConfigured}{#if state.offlineMode}<small class="subtle">Offline mode — goals, tasks, and local helpers stay available. Research resumes when Muse connects.</small><button class="secondary-wide" onclick={() => { commit(setOfflineMode(state, false)); showNotice("Online research re-enabled."); }}>Exit offline mode</button>{:else}<small class="runtime-key-help">Connect Meta Muse in LLM providers to use research.</small><button class="secondary-wide" onclick={() => { commit(setOfflineMode(state, true)); showNotice("Offline workspace active. Nothing here will be presented as live research."); }}>Continue offline</button>{/if}{/if}{#if runtimeError}<small class="runtime-error">{runtimeError}</small>{/if}<button class="object-primary" disabled={runtimeStatus !== "ready" || !runtimeModelConfigured || startingRuntimeRun || !Number.isInteger(runtimeTokenBudget) || runtimeTokenBudget < 1000 || runtimeTokenBudget > 50000} onclick={startMuseResearch}>{startingRuntimeRun ? "Starting Muse…" : runtimeStatus !== "ready" ? "Runtime unavailable" : runtimeModelConfigured ? "Search the web with Muse" : "Connect Muse first"}</button></section>{#if activeRuntimeAgents.length}<div class="runtime-agent-list"><div class="task-heading"><h3>Muse agents</h3><span>{activeRuntimeAgents.length}</span></div>{#each activeRuntimeAgents as runtimeAgent}<button class="runtime-agent-row" onclick={() => { selected = { kind: "agent", id: runtimeAgent.id }; panel = "agent"; }}><span class:runtime-failed={runtimeAgent.status === "failed"} class:runtime-done={runtimeAgent.status === "completed"}>{runtimeAgent.status === "completed" ? "✓" : runtimeAgent.status === "failed" ? "!" : "◌"}</span><span><b>{runtimeAgent.name}</b><small>{runtimeAgent.status.toUpperCase()} · {runtimeAgent.steps} steps · {runtimeAgent.model}</small></span><i>Open ›</i></button>{/each}</div>{/if}{#if activePendingApprovals.length}<div class="runtime-approval-list"><h3>Review requested actions</h3>{#each activePendingApprovals as approval}<article><b>{approval.tool}</b><small>The agent is paused until you approve or deny this page action.</small><div><button onclick={() => resolveRuntimeApproval(approval, "approve")}>Approve once</button><button onclick={() => resolveRuntimeApproval(approval, "deny")}>Deny</button></div></article>{/each}</div>{/if}{#if activeEvidence.length}<div class="runtime-evidence"><div class="task-heading"><h3>Research findings</h3><span>{activeEvidence.length}</span></div>{#each activeEvidence as item}<article><b>{item.finding}</b><blockquote>“{item.quote}”</blockquote><button onclick={() => openEvidenceSource(item)}>Open source ↗</button></article>{/each}</div>{/if}{#if isUbResearchIntent(`${activeGoal.title} ${activeGoal.description}`)}<div class="intent-next-step"><span>{completedPlanGoalIds.includes(activeGoal.id) ? "RESEARCH PLAN READY" : "RESEARCH PLAN STARTS AUTOMATICALLY"}</span>{#if completedPlanGoalIds.includes(activeGoal.id)}<p>This intention has already gone through the planning steps. Open its schedule draft without running them again.</p><button class="object-primary" onclick={() => openSchedulePreview(activeGoal.id)}>Open schedule PDF <span>↗</span></button>{:else}<p>Adding this intention starts the planning steps automatically. You won’t need to run them from here.</p>{/if}</div>{/if}<div class="inspector-block technical-detail"><span>DEPENDENCY CHAIN</span><b>Intent → tasks → agent work → human review</b><small>Each task below belongs to this goal. Delegated agents inherit the goal boundary.</small></div><div class="task-list"><div class="task-heading"><h3>Related tasks</h3><span>{activeGoal.tasks.length.toString().padStart(2, "0")}</span></div>{#each activeGoal.tasks as task, index}<div class="task-row"><span>{String(index + 1).padStart(2, "0")}</span><b>{task}</b><i>{goalTaskStatus(activeGoal, index)}</i></div>{/each}</div>{#if activeGoal.criteria?.length}<div class="task-list"><div class="task-heading"><h3>Completion criteria</h3><span>{activeGoal.criteria.length.toString().padStart(2, "0")}</span></div>{#each activeGoal.criteria as criterion}<div class="task-row"><span>✓</span><b>{criterion}</b></div>{/each}</div>{/if}{#if activeGoal.constraints?.length}<div class="task-list"><div class="task-heading"><h3>Constraints</h3><span>{activeGoal.constraints.length.toString().padStart(2, "0")}</span></div>{#each activeGoal.constraints as constraint}<div class="task-row"><span>!</span><b>{constraint}</b></div>{/each}</div>{/if}<form class="context-form task-form" onsubmit={addGoalTask}><label>ADD A RELATED TASK<input bind:value={newTask} maxlength="90" placeholder="A concrete next step" required /></label><button class="secondary-wide" type="submit">＋ Add task</button></form><button class="object-primary" onclick={assignAgent}>Assign agent</button><div class="inspector-block goal-history"><span>RECENT ACTIVITY FOR THIS GOAL</span>{#each state.events.filter((event) => event.goalId === activeGoal.id).slice(0, 5) as event}<small>{new Date(event.timestamp).toLocaleTimeString()} · {eventLabel(event)}</small>{/each}</div></div>
     {:else if panel === "agent" && activeAgent}<div class="inspector-status"><span class="activity-dot" class:dot-paused={activeAgent.status !== "working"}></span>{activeAgent.status.toUpperCase()} <span>·</span> {activeAgent.provider}</div><div class="inspector-block"><span>ASSIGNED GOAL</span><b>{goals.find((goal) => goal.id === activeAgent.goalId)?.title}</b></div><div class="inspector-block technical-detail"><span>AGENT PROFILE</span><b>{activeAgent.model}</b><small>{activeAgent.runtime ? "Live runtime agent" : "Not assigned to a live provider"}</small></div><div class="inspector-block"><span>CURRENT TASK</span><b>{activeAgent.currentTask ?? "No active task"}</b></div>{#if activeAgent.runtime && activeAgent.error}<p class="runtime-error">{activeAgent.error}</p>{/if}<div class="inspector-block technical-detail"><span>PERMISSION SCOPE</span><div class="permission-list">{#each activeAgent.permissions as permission}<code>{permission}</code>{/each}</div></div><div class="inspector-block technical-detail"><span>DELEGATION</span><b>{activeAgent.parentAgentId ? `Child of ${agents.find((agent) => agent.id === activeAgent.parentAgentId)?.name ?? "agent"}` : "Root agent"}</b><small>At most 2 children per agent; depth capped at 2. Child scope cannot exceed parent scope.</small></div>{#if activeAgent.runtime}<div class="panel-actions">{#if activeAgent.status === "working"}<button class="secondary-wide" onclick={() => controlRuntimeAgent(activeAgent, "pause")}>Pause at next safe step</button>{:else if activeAgent.status === "paused"}<button class="secondary-wide" onclick={() => controlRuntimeAgent(activeAgent, "resume")}>Resume agent</button>{:else if activeAgent.status === "failed"}<button class="secondary-wide" onclick={startMuseResearch}>Start a fresh research run</button>{/if}{#if !["completed", "failed", "stopped"].includes(activeAgent.status)}<button class="danger-button" onclick={() => controlRuntimeAgent(activeAgent, "stop")}>Stop agent</button>{/if}<p class="subtle">Runtime ID: {activeAgent.runId}</p></div>{:else}<div class="panel-actions"><button class="secondary-wide" onclick={() => toggleAgent(activeAgent)}>{activeAgent.status === "working" ? "Pause agent" : "Resume agent"}</button><button class="secondary-wide advanced-control" onclick={() => spawn(activeAgent)} disabled={!canSpawn(state, activeAgent)}>Add restricted subagent</button><button class="secondary-wide" onclick={() => commit(transitionAgent(state, activeAgent.id, "complete"))}>Complete task</button><button class="secondary-wide advanced-control" onclick={() => commit(transitionAgent(state, activeAgent.id, "fail"))}>Fail task</button><button class="secondary-wide advanced-control" onclick={() => evaluateExample(activeAgent)}>Review access rules</button><button class="secondary-wide advanced-control" onclick={() => requestPayment(activeAgent)}>Request payment</button></div>{/if}
     {:else if panel === "guard"}
       <div class="inspector-block"><span>RUNTIME INVESTIGATIONS</span><b>Cases are created when AIP blocks an agent action.</b><p>Evidence, model identity, and status are retained with the runtime workspace.</p></div>
@@ -792,7 +1051,7 @@
           {#if activeGuardCase.evidence.filter((item) => item.source_type === "guard_interview_turn").length < 5 && activeGuardCase.status !== "closed" && activeGuardCase.status !== "inconclusive"}<button class="secondary-wide" onclick={() => startGuardInterview(activeGuardCase!.id)} disabled={Boolean(interviewingCaseId || investigatingCaseId || adjudicatingCaseId)}>{interviewingCaseId === activeGuardCase.id ? "Wonder is choosing a question; the agent is responding…" : `Ask the agent an adaptive question · ${activeGuardCase.evidence.filter((item) => item.source_type === "guard_interview_turn").length}/5`}</button>{/if}
           <small>Each turn uses Wonder to choose a question and the original agent model to answer. Agent answers are self-reports, not proof; important claims must match the independent event record. Up to five questions per case.</small>{#if guardInvestigationError && selectedGuardCaseId === activeGuardCase.id}<p class="runtime-error">{guardInvestigationError}</p>{/if}</div>
           {#if activeGuardCase.status !== "closed" && activeGuardCase.status !== "inconclusive" && activeGuardCase.status !== "containment_requested"}<button class="secondary-wide" onclick={() => startGuardAdjudication(activeGuardCase!.id)} disabled={Boolean(interviewingCaseId || investigatingCaseId || adjudicatingCaseId)}>{adjudicatingCaseId === activeGuardCase.id ? "Independent Adjudicator reviewing primary evidence…" : "Request independent Adjudicator review"}</button><small>Uses {activeGuardCase.provider === "meta" ? "Muse Wonder" : activeGuardCase.provider}; prior model reports are excluded. Its assessment is advisory and cannot change access policy.</small>{/if}
-          {#if activeGuardCase.status === "awaiting_human_review" && activeGuardAgent && !["completed", "failed", "stopped"].includes(activeGuardAgent.status)}<div class="inspector-block"><span>USER-AUTHORIZED CONTAINMENT</span><b>AIP remains in control of permissions. Guard cannot change access rules.</b><p>Containment is applied by KeplerV’s trusted runtime only after you confirm below.</p>{#if activeGuardAgent.status === "paused"}<button class="secondary-wide" onclick={() => applyGuardContainment(activeGuardCase!.id, "resume_agent")}>Resume affected agent</button>{:else}<button class="danger-button" onclick={() => applyGuardContainment(activeGuardCase!.id, "pause_agent")}>Pause affected agent</button>{/if}</div>{/if}
+          {#if activeGuardCase.status === "awaiting_human_review" && activeGuardAgent && !["completed", "failed", "stopped"].includes(activeGuardAgent.status)}<div class="inspector-block"><span>USER-AUTHORIZED CONTAINMENT</span><b>AIP policy stays unchanged. Containment only narrows this agent’s run.</b><p>Containment is applied by KeplerV’s trusted runtime only after you confirm below.</p>{#if activeGuardAgent.status === "paused"}<button class="secondary-wide" onclick={() => applyGuardContainment(activeGuardCase!.id, "resume_agent")}>Resume affected agent</button>{:else}<button class="danger-button" onclick={() => applyGuardContainment(activeGuardCase!.id, "pause_agent")}>Pause affected agent</button>{/if}{#if pendingRuntimeApprovals.some((item) => item.runId === activeGuardAgent.runId)}<button class="danger-button" onclick={() => applyGuardContainment(activeGuardCase!.id, "deny_pending")}>Deny pending actions</button>{/if}{#if activeGuardAgent.browserIsolated}<button class="secondary-wide" onclick={() => applyGuardContainment(activeGuardCase!.id, "restore_browser")}>Restore browser session</button>{:else}<button class="secondary-wide" onclick={() => applyGuardContainment(activeGuardCase!.id, "isolate_browser")}>Isolate browser session</button>{/if}{#if activeGuardAgent.permissions.includes("browser.interact")}<button class="secondary-wide" onclick={() => applyGuardContainment(activeGuardCase!.id, "revoke_capability", "browser.interact")}>Revoke page interaction</button>{/if}{#if activeGuardAgent.permissions.includes("delegate")}<button class="secondary-wide" onclick={() => applyGuardContainment(activeGuardCase!.id, "revoke_capability", "delegate")}>Revoke delegation</button>{/if}</div>{/if}
           <div class="evidence-list"><h3>Case record</h3>{#each activeGuardCase.evidence as evidence, i}<article><b>{String(i + 1).padStart(2, "0")} · {evidence.source_type.replaceAll("_", " ")}</b>{#if evidence.source_type === "guard_screening"}<p><strong>Muse Spark · qualitative risk: {String((evidence.payload.screening as Record<string, unknown>)?.risk_level ?? "not available")}</strong></p><p>{String((evidence.payload.screening as Record<string, unknown>)?.summary ?? "")}</p><p>{String((evidence.payload.screening as Record<string, unknown>)?.rationale ?? "")}</p><small>Sources: {((evidence.payload.screening as Record<string, unknown>)?.evidence_ids as string[] ?? []).join(", ")} · Not a probability or enforcement decision</small>{#each (((evidence.payload.screening as Record<string, unknown>)?.uncertainties as string[]) ?? []) as uncertainty}<p>Uncertainty: {uncertainty}</p>{/each}{:else if evidence.source_type === "guard_screening_error"}<p>Muse Spark screening error: {String(evidence.payload.error ?? "The model request failed")}</p>{:else if evidence.payload.report}<p>{(evidence.payload.report as RuntimeDetectiveReport).summary}</p><small>Assessment: {(evidence.payload.report as RuntimeDetectiveReport).assessment.replaceAll("_", " ")} · {(evidence.payload.provider as string)} · {(evidence.payload.model as string)}</small>{#each (evidence.payload.report as RuntimeDetectiveReport).findings as finding}<p><strong>{finding.classification.replaceAll("_", " ")}</strong> · {finding.claim}</p><small>Sources: {finding.evidence_ids.join(", ")}</small>{/each}{#if (evidence.payload.report as RuntimeDetectiveReport).uncertainties.length}<p>Uncertainty: {(evidence.payload.report as RuntimeDetectiveReport).uncertainties.join(" · ")}</p>{/if}<p>Next step: {(evidence.payload.report as RuntimeDetectiveReport).recommended_next_step}</p>{:else if evidence.source_type === "guard_adjudication"}<p><strong>Disposition: {String((evidence.payload.report as Record<string, unknown>)?.disposition ?? "review unavailable").replaceAll("_", " ")}</strong></p><p>{String((evidence.payload.report as Record<string, unknown>)?.summary ?? "")}</p>{#each (((evidence.payload.report as Record<string, unknown>)?.findings as Array<Record<string, unknown>>) ?? []) as finding}<p>{String(finding.claim ?? "")}</p><small>Evidence: {((finding.evidence_ids as string[]) ?? []).join(", ")}</small>{/each}{#each (((evidence.payload.report as Record<string, unknown>)?.contradictions as Array<Record<string, unknown>>) ?? []) as contradiction}<p><strong>Possible contradiction</strong></p><p>Agent statement: {String(contradiction.agent_statement ?? "")}</p><p>Recorded event: {String(contradiction.observed_record ?? "")}</p><small>Evidence: {((contradiction.evidence_ids as string[]) ?? []).join(", ")}</small>{/each}<p>{String((evidence.payload.report as Record<string, unknown>)?.recommended_response ?? "")}</p><small>Advisory only · {String(evidence.payload.provider)} · {String(evidence.payload.model)} · Prior model reports excluded</small>{:else if evidence.source_type === "guard_interview_turn"}<p><strong>Question {String(evidence.payload.turn)}:</strong> {String(evidence.payload.question ?? "Question pending")}</p><small>{String(evidence.payload.interrogator_provider)} · {String(evidence.payload.interrogator_model)} · Cites: {((evidence.payload.evidence_ids as string[]) ?? []).join(", ")}</small><p>{String(evidence.payload.rationale ?? "")}</p>{:else if evidence.source_type === "guard_interview_answer"}<p><strong>Agent response:</strong> {String(evidence.payload.answer ?? "No answer recorded")}</p><small>{String(evidence.payload.suspect_provider)} · {String(evidence.payload.suspect_model)} · Self-report, independently unverified</small>{:else if evidence.source_type === "guard_containment_action"}<p><strong>{String(evidence.payload.action).replaceAll("_", " ")}</strong> · agent status: {String(evidence.payload.run_status)}</p><p>{String(evidence.payload.reason)}</p><small>Authorized by {String(evidence.payload.authorized_by)} · AIP policy unchanged</small>{:else if evidence.source_type === "guard_interview_error"}<p>Interview error: {String(evidence.payload.error ?? "The model request failed")}</p>{:else}<p>{String(evidence.payload.reason ?? evidence.payload.summary ?? evidence.payload.action ?? evidence.payload.type ?? "Runtime policy event")}</p>{/if}<small>Evidence ID {evidence.id} · {new Date(evidence.timestamp).toLocaleString()}</small></article>{/each}</div>
         {/if}
       {:else}<div class="empty-state"><span>✓</span><h3>No Guard cases</h3><p>When AIP blocks an agent action, its evidence will appear here for review.</p></div>{/if}

@@ -63,6 +63,30 @@ The deterministic Python workflow exercises orchestration, AIP denial, event per
 
 Run `npm run test:browser` to exercise the scheduler and event/evidence store against a real Playwright Chromium session and the public Python documentation site. The Python suite also includes a full live Muse + Chromium workflow. It runs automatically when `MODEL_API_KEY` is present and is skipped otherwise; that test makes real requests to Meta and the public article.
 
+Run the live Guard evaluation (scenario captures plus Spark/Wonder investigation on every config) with:
+
+```sh
+MODEL_API_KEY="your Meta Model API key" .venv/bin/python -m runtime.experiments.live_eval [output-directory]
+```
+
+It writes `evaluation.json` and `evaluation.md` with measured detections, citations, questions, tokens, and latency. The deterministic suite covers the same harness with scripted models.
+
+Measure one live research run (13.4s wall, 3 steps, 7,409 tokens, 3 findings in the recorded run) with:
+
+```sh
+MODEL_API_KEY="your Meta Model API key" npm run benchmark -- runtime/experiments/results/benchmark
+```
+
+It writes `benchmark.json` plus a full `trace.json` you can replay labeled with `python -m runtime.experiments.replay <trace.json>`.
+
+Run the desktop app with the synthetic demo environment using:
+
+```sh
+KEPLERV_DEMO_MODE=1 npm run desktop
+```
+
+Then open any goal and use the "Use fictional demo fixtures" button to point research at the university catalog. Fixture pages are fictional, labeled, and unreachable outside demo mode.
+
 ## What is operational and what remains simulated
 
 | Area | Current behavior |
@@ -73,13 +97,19 @@ Run `npm run test:browser` to exercise the scheduler and event/evidence store ag
 | Research browser | Isolated Playwright/Chromium context, public web search, search-result origin authorization, typed browser tools; actual Chromium launch not proven by the fake-browser tests |
 | AIP | Deterministic Python authorization for supported tools; experimental, not a production security protocol |
 | Events and evidence | Runtime-generated records persist locally; Guard cases correlate AIP denials with append-only, hash-chained evidence and case-level read permissions |
-| Guard Observer | Deterministic AIP denial rules open and group cases per run; one contextual Muse Spark screen is triggered per case, with qualitative uncalibrated risk and evidence-cited output |
-| Guard investigation | User-started Muse Wonder report plus adaptive, one-question-at-a-time interviews; Wonder chooses evidence-cited questions, the original agent model answers in an isolated no-tools context, each statement is retained as unverified evidence, and the five-question cap persists with the case; live model calls remain unverified |
-| Guard Adjudicator | Independent Muse Wonder review excludes the Detective report, validates citations, distinguishes denials from completed actions, and records contradictions and uncertainty for human review; it cannot change AIP policy; live model calls remain unverified |
-| Guard containment | A human-confirmed pause/resume is routed through the trusted runtime, recorded in the hash-chained case history, and leaves AIP policy unchanged; deny-pending, revocation, browser isolation, and automatic emergency rules remain unimplemented |
+| Guard Observer | Deterministic AIP denial rules open and group cases per run; one contextual Muse Spark screen is triggered per case, with qualitative uncalibrated risk and evidence-cited output; cases missed by a restart are re-screened on launch |
+| Guard investigation | User-started Muse Wonder report plus adaptive, one-question-at-a-time interviews; Wonder chooses evidence-cited questions, the original agent model answers in an isolated no-tools context, each statement is retained as unverified evidence, and the five-question cap persists with the case; verified live against Meta models |
+| Guard Adjudicator | Independent Muse Wonder review excludes the Detective report, validates citations, distinguishes denials from completed actions, and records contradictions and uncertainty for human review; it cannot change AIP policy; verified live against Meta models |
+| Guard containment | Human-confirmed pause/resume, deny-pending, capability revocation, browser isolation/restore, and review requests are routed through the trusted runtime, recorded in the hash-chained case history, and leave AIP policy unchanged; automatic emergency rules remain unimplemented |
+| Guard scenarios and evaluation | Five isolated adversarial scenarios (prompt injection, benign anomaly, delegation abuse, contradictory statements, search poisoning) plus a three-config evaluation harness with a no-interview ablation; see `runtime/experiments/results/` for measured live-model outputs |
 | Provider connections | Cloud credentials are saved in macOS Keychain; provider settings and local model endpoints stay on-device; ChatGPT account tokens are refreshed and used only when plan usage was authorized |
 | Offline workspace | Explicitly selectable from the goal panel when no model is connected; goals, tasks, and local helpers stay available while research stays gated and nothing is presented as live |
-| Voice transcription | Still a labeled selectable demonstration; no speech-to-text model is connected |
+| Voice transcription | Real 16kHz microphone capture with energy endpointing, transcribed by Meta `muse-voice-transcribe-1.0`; example transcripts remain only as an explicit fallback when recording or transcription is unavailable |
+| Speech output | Real system-native speech synthesis with interrupt-to-listen, announcements for approvals, Guard cases, and completions, plus a settings toggle; presence shows listening, processing, and speaking states |
+| Intent interpreter | Muse classifies 15 spoken operations with validated target IDs from live workspace context; unknown references and ambiguity return clarification questions, never guesses |
+| Voice approvals | Spoken requests open the exact pending approval and read its details; confirmation stays a deliberate button action in the goal panel and AIP makes the final decision |
+| Synthetic demo environment | Fictional KeplerV University fixtures served from loopback; AIP exemption is path-scoped to `/demo/`, requires explicit `KEPLERV_DEMO_MODE=1`, and keeps capability and approval checks |
+| Tracing and replay | `GET /runs/{id}/trace` exports events, evidence, cases, and stage latencies; `runtime.experiments.replay` verifies and plays traces back labeled REPLAY without model calls |
 | UB schedule PDF | Existing guided product demonstration; it is not produced by the research runtime |
 | Legacy sample goals and agents | Existing workspace examples remain local; Guard cases now come from actual runtime AIP decisions |
 

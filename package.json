@@ -12,7 +12,9 @@
     "desktop:build": "tauri build --bundles app",
     "test": "vitest run",
     "test:runtime": ".venv/bin/python -m pytest runtime/tests -q",
-    "test:browser": "KEPLERV_LIVE_BROWSER_TEST=1 .venv/bin/python -m pytest runtime/tests/test_browser_live.py -q"
+    "test:browser": "KEPLERV_LIVE_BROWSER_TEST=1 .venv/bin/python -m pytest runtime/tests/test_browser_live.py -q",
+    "eval:guard": ".venv/bin/python -m runtime.experiments.live_eval",
+    "benchmark": ".venv/bin/python -m runtime.experiments.benchmark"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",

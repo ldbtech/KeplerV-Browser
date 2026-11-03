@@ -219,6 +219,33 @@ fn authenticated_get(
         .map_err(|_| "KeplerV runtime returned an unreadable response.".into())
 }
 
+fn authenticated_post_bytes(
+    client: &Client,
+    base_url: &str,
+    token: &str,
+    path: &str,
+    content_type: &str,
+    body: Vec<u8>,
+) -> Result<Value, String> {
+    let response = client
+        .post(format!("{base_url}{path}"))
+        .bearer_auth(token)
+        .header("Content-Type", content_type)
+        .body(body)
+        .send()
+        .map_err(|_| "Could not reach KeplerV's local runtime.".to_string())?;
+    let status = response.status();
+    let payload: Value = response.json().unwrap_or_else(|_| json!({}));
+    if !status.is_success() {
+        let detail = payload
+            .get("detail")
+            .and_then(Value::as_str)
+            .unwrap_or("Runtime request failed.");
+        return Err(format!("{}", detail.chars().take(500).collect::<String>()));
+    }
+    Ok(payload)
+}
+
 fn authenticated_post(
     client: &Client,
     base_url: &str,
@@ -344,6 +371,9 @@ fn start_locked(app: &AppHandle, slot: &mut Option<ManagedRuntime>) -> Result<Va
         }
     }
     command.env("KEPLERV_MODEL_PROVIDER", &provider).env("KEPLERV_MODEL_NAME", &model).env("KEPLERV_MODEL_BASE_URL", &endpoint);
+    if env::var("KEPLERV_DEMO_MODE").as_deref() == Ok("1") {
+        command.env("KEPLERV_DEMO_MODE", "1");
+    }
     let mut child = command.spawn().map_err(|_| "Could not start Python 3.12 runtime. Install runtime/requirements.txt and select Python with KEPLERV_PYTHON if needed.".to_string())?;
     let client = authorized_client()?;
     let mut ready = false;
@@ -717,6 +747,92 @@ pub fn runtime_snapshot(
 }
 
 #[tauri::command]
+pub fn runtime_info(
+    window: WebviewWindow,
+    state: State<'_, RuntimeBridge>,
+) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    let slot = state
+        .runtime
+        .lock()
+        .map_err(|_| "Runtime state is unavailable.".to_string())?;
+    let runtime = slot
+        .as_ref()
+        .ok_or_else(|| "Runtime is not running.".to_string())?;
+    Ok(json!({"base_url": runtime.base_url}))
+}
+
+#[tauri::command]
+pub fn transcribe_audio(
+    window: WebviewWindow,
+    state: State<'_, RuntimeBridge>,
+    audio_b64: String,
+) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    use base64::Engine;
+    let audio = base64::engine::general_purpose::STANDARD
+        .decode(audio_b64.as_bytes())
+        .map_err(|_| "Voice recording could not be decoded.".to_string())?;
+    if audio.is_empty() || audio.len() > 8 * 1024 * 1024 {
+        return Err("Voice recording is too long; keep requests under a few minutes.".into());
+    }
+    let slot = state
+        .runtime
+        .lock()
+        .map_err(|_| "Runtime state is unavailable.".to_string())?;
+    let runtime = slot
+        .as_ref()
+        .ok_or_else(|| "Runtime is not running.".to_string())?;
+    let client = Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(100))
+        .build()
+        .map_err(|e| format!("Could not initialize the local runtime connection: {e}"))?;
+    authenticated_post_bytes(
+        &client,
+        &runtime.base_url,
+        &runtime.token,
+        "/transcribe",
+        "audio/wav",
+        audio,
+    )
+}
+
+#[tauri::command]
+pub fn interpret_voice(
+    window: WebviewWindow,
+    state: State<'_, RuntimeBridge>,
+    transcript: String,
+    context: Value,
+) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    if transcript.trim().is_empty() || transcript.len() > 2000 {
+        return Err("Voice transcript was empty or too long.".into());
+    }
+    let slot = state
+        .runtime
+        .lock()
+        .map_err(|_| "Runtime state is unavailable.".to_string())?;
+    let runtime = slot
+        .as_ref()
+        .ok_or_else(|| "Runtime is not running.".to_string())?;
+    let client = Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(75))
+        .build()
+        .map_err(|e| format!("Could not initialize the local runtime connection: {e}"))?;
+    authenticated_post(
+        &client,
+        &runtime.base_url,
+        &runtime.token,
+        "/interpret",
+        json!({"transcript":transcript,"context":context}),
+    )
+}
+
+#[tauri::command]
 pub fn runtime_create_run(
     window: WebviewWindow,
     state: State<'_, RuntimeBridge>,
@@ -862,6 +978,7 @@ pub fn runtime_guard_containment(
     case_id: String,
     action: String,
     reason: String,
+    capability: Option<String>,
 ) -> Result<Value, String> {
     ensure_main_window(&window)?;
     let (base_url, token) = {
@@ -875,6 +992,6 @@ pub fn runtime_guard_containment(
         &base_url,
         &token,
         &format!("/guard/cases/{case_id}/containment"),
-        json!({"action":action,"reason":reason}),
+        json!({"action":action,"reason":reason,"capability":capability}),
     )
 }

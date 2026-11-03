@@ -53,8 +53,10 @@ class GuardTransitionRequest(BaseModel):
 
 class GuardContainmentRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    action: Literal["pause_agent", "resume_agent"]
+    action: Literal["pause_agent", "resume_agent", "deny_pending", "revoke_capability",
+                    "isolate_browser", "restore_browser", "request_human_review"]
     reason: str = Field(min_length=3, max_length=1000)
+    capability: str | None = Field(default=None, max_length=64)
 
 
 class DetectiveFinding(BaseModel):

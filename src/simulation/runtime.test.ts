@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { evaluateAction, isSubset } from "./aipPolicy";
-import { addTask, advanceSimulationClock, createAgent, createGoal, setOfflineMode, spawnSubagent, transitionAgent } from "./runtime";
+import { addTask, advanceSimulationClock, createAgent, createGoal, modifyGoal, setOfflineMode, spawnSubagent, transitionAgent } from "./runtime";
 import { initialState, MAX_CHILDREN, MAX_DEPTH } from "./seed";
 import type { AppState } from "../types";
 
@@ -62,6 +62,19 @@ describe("goal and agent runtime", () => {
     expect(restored.goals[0].id).toBe(state.goals[0].id);
     expect(restored.agents[0].permissions).toEqual(state.agents[0].permissions);
     expect(restored.events[0].type).toBe("agent_created");
+  });
+
+  it("modifies goal details, tasks, criteria, and constraints", () => {
+    const created = createGoal(fresh(), "Research", "Study thoroughly.");
+    const goal = created.goals[0];
+    expect(goal.criteria.length).toBe(1);
+    const updated = modifyGoal(created, goal.id, { description: "Study world models.", addTask: "Find three papers", addCriterion: "Three papers compared", addConstraint: "Public sources only" });
+    const next = updated.goals.find((item) => item.id === goal.id)!;
+    expect(next.description).toBe("Study world models.");
+    expect(next.tasks).toContain("Find three papers");
+    expect(next.criteria).toContain("Three papers compared");
+    expect(next.constraints).toContain("Public sources only");
+    expect(modifyGoal(created, "goal-missing", { title: "Nope" })).toBe(created);
   });
 
   it("selects offline mode explicitly and records the choice", () => {

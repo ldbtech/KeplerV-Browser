@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -38,6 +39,40 @@ def _sanitize(value: Any, key: str = "") -> Any:
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return str(value)[:300]
+
+
+def trim_bundle_to_fit(bundle: dict[str, Any], limit: int, minimum_events: int = 10,
+                       trigger_event_id: str | None = None) -> dict[str, Any]:
+    """Drop oldest routine events, then oldest case evidence, until the bundle fits.
+
+    The trigger event, AIP decisions, and Guard history are always kept; the
+    newest case evidence is preferred because interviews build on recent turns.
+    """
+    def _protected(event: dict[str, Any]) -> bool:
+        if trigger_event_id and event["id"] == trigger_event_id:
+            return True
+        return event["type"] == "aip.decision" or event["type"].startswith("guard.")
+
+    def _routine_count() -> int:
+        return sum(1 for event in bundle["runtime_events"] if not _protected(event))
+
+    def _drop_oldest_routine() -> None:
+        for index, event in enumerate(bundle["runtime_events"]):
+            if not _protected(event):
+                del bundle["runtime_events"][index]
+                return
+
+    while bundle_size(bundle) > limit and _routine_count() > minimum_events:
+        _drop_oldest_routine()
+    while bundle_size(bundle) > limit and _routine_count() > 0:
+        _drop_oldest_routine()
+    while bundle_size(bundle) > limit and len(bundle["case_evidence"]) > 4:
+        del bundle["case_evidence"][0]
+    return bundle
+
+
+def bundle_size(bundle: dict[str, Any]) -> int:
+    return len(json.dumps(bundle, ensure_ascii=False, separators=(",", ":")))
 
 
 class GuardEvidenceService:

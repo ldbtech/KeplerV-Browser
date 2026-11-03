@@ -9,8 +9,22 @@ export function appendEvent(state: AppState, type: KeplerEvent["type"], payload:
 }
 
 export function createGoal(state: AppState, title: string, description: string): AppState {
-  const goal: Goal = { id: makeId("goal"), title, description, progress: 0, status: "active", tasks: ["Clarify the next step", "Collect useful evidence", "Review the outcome"], createdAt: new Date(state.simulationTime).toISOString() };
+  const goal: Goal = { id: makeId("goal"), title, description, progress: 0, status: "active", tasks: ["Clarify the next step", "Collect useful evidence", "Review the outcome"], criteria: ["Outcome reviewed against the request"], constraints: [], createdAt: new Date(state.simulationTime).toISOString() };
   return appendEvent({ ...state, goals: [goal, ...state.goals] }, "goal_created", { summary: title }, undefined, goal.id);
+}
+
+export function modifyGoal(state: AppState, goalId: string, patch: { title?: string; description?: string; addTask?: string; addCriterion?: string; addConstraint?: string }): AppState {
+  const goal = state.goals.find((item) => item.id === goalId);
+  if (!goal) return state;
+  const next: Goal = {
+    ...goal,
+    ...(patch.title ? { title: patch.title.slice(0, 160) } : {}),
+    ...(patch.description ? { description: patch.description.slice(0, 2000) } : {}),
+    ...(patch.addTask ? { tasks: [...goal.tasks, patch.addTask.slice(0, 200)] } : {}),
+    ...(patch.addCriterion ? { criteria: [...goal.criteria, patch.addCriterion.slice(0, 200)] } : {}),
+    ...(patch.addConstraint ? { constraints: [...goal.constraints, patch.addConstraint.slice(0, 200)] } : {}),
+  };
+  return appendEvent({ ...state, goals: state.goals.map((item) => item.id === goalId ? next : item) }, "goal_task_added", { summary: `Updated ${goal.title}` }, undefined, goalId);
 }
 
 export function createAgent(state: AppState, goalId: string, parent?: Agent): AppState {

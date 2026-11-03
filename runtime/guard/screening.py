@@ -5,10 +5,9 @@ import json
 from typing import Any
 from uuid import uuid4
 
-from pydantic import ValidationError
-
 from runtime.guard.case_manager import GuardCaseManager
-from runtime.guard.evidence import GuardEvidenceService
+from runtime.guard.evidence import GuardEvidenceService, bundle_size, trim_bundle_to_fit
+from runtime.guard.parsing import ModelOutputError, generate_valid_json
 from runtime.guard.schemas import ObserverScreening
 from runtime.providers import ModelProviderError, ProviderRegistry
 from runtime.store import RuntimeStore
@@ -22,7 +21,7 @@ class GuardScreener:
     """One contextual Muse Spark screen per deterministic rule-triggered case."""
 
     MAX_INPUT_CHARS = 18_000
-    CALL_TIMEOUT_SECONDS = 75
+    CALL_TIMEOUT_SECONDS = 120
 
     def __init__(self, store: RuntimeStore, providers: ProviderRegistry,
                  cases: GuardCaseManager | None = None,
@@ -32,17 +31,6 @@ class GuardScreener:
         self.cases = cases or GuardCaseManager(store)
         self.evidence = evidence or GuardEvidenceService(store, self.cases)
         self._case_locks: dict[str, asyncio.Lock] = {}
-
-    @staticmethod
-    def _parse(content: str) -> ObserverScreening:
-        candidate = content.strip()
-        if candidate.startswith("```"):
-            candidate = candidate.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        try:
-            value, _ = json.JSONDecoder().raw_decode(candidate)
-            return ObserverScreening.model_validate(value)
-        except (json.JSONDecodeError, ValidationError, TypeError) as exc:
-            raise GuardScreeningError("Muse Spark returned an invalid screening result.") from exc
 
     async def screen(self, case_id: str) -> dict[str, Any]:
         if not self.cases.can_read(case_id, "guard_detective"):
@@ -57,9 +45,10 @@ class GuardScreener:
                 return previous["payload"]
             provider = self.providers.active_provider
             model = "muse-spark-1.3" if provider == "meta" else self.providers.active_model
-            bundle = self.evidence.reconstruct_case(case_id)
+            bundle = trim_bundle_to_fit(self.evidence.reconstruct_case(case_id), self.MAX_INPUT_CHARS,
+                                               trigger_event_id=case["trigger_event_id"])
             serialized = json.dumps(bundle, ensure_ascii=False, separators=(",", ":"))
-            if len(serialized) > self.MAX_INPUT_CHARS:
+            if bundle_size(bundle) > self.MAX_INPUT_CHARS:
                 raise GuardScreeningError("The sanitized evidence bundle exceeds the Observer input limit.")
             allowed_ids = ({item["id"] for item in bundle["runtime_events"]}
                            | {item["id"] for item in bundle["case_evidence"]}
@@ -67,24 +56,26 @@ class GuardScreener:
             request_id = f"guard-screening-{uuid4()}"
             try:
                 adapter = self.providers.get(provider)
-                result = await asyncio.wait_for(adapter.generate(model, [
-                    {"role": "system", "content": (
-                        "You are KeplerV Guard's Muse Spark Observer. Deterministic AIP rules have already recorded an event. "
-                        "Assess contextual relevance only; do not decide guilt, infer hidden intent, or authorize containment. "
-                        "A denied action establishes an attempt and denial, not successful access. Cite supplied evidence IDs. "
-                        "Return JSON only: {risk_level:low|moderate|elevated,summary,evidence_ids,rationale,uncertainties}. "
-                        "Risk labels are qualitative and uncalibrated, not probabilities."
-                    )},
-                    {"role": "user", "content": serialized},
-                ], tools=[]), timeout=self.CALL_TIMEOUT_SECONDS)
-                if not result.message:
-                    raise GuardScreeningError("Muse Spark returned no screening result.")
-                screening = self._parse(result.message)
+                try:
+                    screening, usage = await generate_valid_json(adapter, model, [
+                        {"role": "system", "content": (
+                            "You are KeplerV Guard's Muse Spark Observer. Deterministic AIP rules have already recorded an event. "
+                            "Assess contextual relevance only; do not decide guilt, infer hidden intent, or authorize containment. "
+                            "A denied action establishes an attempt and denial, not successful access. Cite supplied evidence IDs. "
+                            "Return JSON only: {risk_level:low|moderate|elevated,summary,evidence_ids,rationale,uncertainties}. "
+                            "Risk labels are qualitative and uncalibrated, not probabilities."
+                        )},
+                        {"role": "user", "content": serialized},
+                    ], ObserverScreening.model_validate, timeout=self.CALL_TIMEOUT_SECONDS)
+                except ModelOutputError as exc:
+                    raise GuardScreeningError("Muse Spark returned an invalid screening result.") from exc
                 unknown = set(screening.evidence_ids) - allowed_ids
                 if unknown:
-                    raise GuardScreeningError("Muse Spark cited evidence not present in the case; screening was rejected.")
+                    raise GuardScreeningError(
+                        f"Muse Spark cited evidence not present in the case ({', '.join(sorted(unknown)[:4])}); "
+                        "screening was rejected.")
                 payload = {"qualitative_only": True, "provider": provider, "model": model,
-                           "usage": result.usage, "screening": screening.model_dump(mode="json"),
+                           "usage": usage, "screening": screening.model_dump(mode="json"),
                            "source_evidence_ids": sorted(set(screening.evidence_ids))}
                 self.store.append_guard_evidence(case_id, "guard_screening", request_id, case["updated_at"], payload)
                 run = self.store.get_run(case["run_id"])

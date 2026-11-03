@@ -48,6 +48,7 @@ class RuntimeStore:
                   tools TEXT NOT NULL, step_budget INTEGER NOT NULL, token_budget INTEGER NOT NULL,
                   steps INTEGER NOT NULL DEFAULT 0, tokens_used INTEGER NOT NULL DEFAULT 0,
                   browser_visited INTEGER NOT NULL DEFAULT 0, text_extracted INTEGER NOT NULL DEFAULT 0,
+                  browser_isolated INTEGER NOT NULL DEFAULT 0,
                   result TEXT, error TEXT, conversation TEXT NOT NULL DEFAULT '[]', current_url TEXT,
                   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
@@ -102,6 +103,8 @@ class RuntimeStore:
                 db.execute("ALTER TABLE runs ADD COLUMN conversation TEXT NOT NULL DEFAULT '[]'")
             if "current_url" not in columns:
                 db.execute("ALTER TABLE runs ADD COLUMN current_url TEXT")
+            if "browser_isolated" not in columns:
+                db.execute("ALTER TABLE runs ADD COLUMN browser_isolated INTEGER NOT NULL DEFAULT 0")
             interrupted = db.execute("SELECT id,agent_id,goal_id FROM runs WHERE status IN ('created','idle','running','blocked')").fetchall()
             for row in interrupted:
                 db.execute("UPDATE runs SET status='paused',error='KeplerV restarted; resume this run to continue.' WHERE id=?", (row["id"],))
@@ -145,6 +148,7 @@ class RuntimeStore:
         item["tools"] = json.loads(item["tools"])
         item["browser_visited"] = bool(item["browser_visited"])
         item["text_extracted"] = bool(item["text_extracted"])
+        item["browser_isolated"] = bool(item["browser_isolated"])
         if item["result"]:
             item["result"] = json.loads(item["result"])
         item["conversation"] = json.loads(item["conversation"])
@@ -161,6 +165,19 @@ class RuntimeStore:
         assignments = ",".join(f"{key}=?" for key in fields)
         with self._lock, self._connect() as db:
             db.execute(f"UPDATE runs SET {assignments} WHERE id=?", (*fields.values(), run_id))
+
+    def revoke_run_capability(self, run_id: str, capability: str) -> list[str] | None:
+        run = self.get_run(run_id)
+        if not run:
+            return None
+        remaining = [item for item in run["permissions"] if item != capability]
+        with self._lock, self._connect() as db:
+            db.execute("UPDATE runs SET permissions=?,updated_at=? WHERE id=?",
+                       (json.dumps(remaining), utc_now(), run_id))
+        return remaining
+
+    def set_browser_isolated(self, run_id: str, isolated: bool) -> None:
+        self.update_run(run_id, browser_isolated=int(isolated))
 
     def add_event(self, run: dict[str, Any], event_type: str, status: str, payload: dict[str, Any] | None = None, tool: str | None = None) -> dict[str, Any]:
         event_id, timestamp = f"evt-{uuid4()}", utc_now()
@@ -311,7 +328,7 @@ class RuntimeStore:
             "triaged": {"investigating", "awaiting_human_review", "inconclusive", "closed"},
             "investigating": {"interviewing", "evaluating", "awaiting_evidence", "awaiting_human_review", "inconclusive", "closed"},
             "interviewing": {"evaluating", "awaiting_evidence", "awaiting_human_review", "inconclusive"},
-            "evaluating": {"awaiting_human_review", "containment_requested", "inconclusive", "closed"},
+            "evaluating": {"awaiting_evidence", "awaiting_human_review", "containment_requested", "inconclusive", "closed"},
             "awaiting_evidence": {"investigating", "interviewing", "evaluating", "inconclusive", "closed"},
             "awaiting_human_review": {"investigating", "interviewing", "containment_requested", "closed", "reopened"},
             "containment_requested": {"awaiting_human_review", "closed", "reopened"},
