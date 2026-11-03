@@ -3,6 +3,6 @@
 <plist version="1.0">
 <dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>KeplerV uses microphone input only when you activate intent capture. Audio is processed locally for live level feedback and is not stored.</string>
+  <string>KeplerV records audio only when you activate voice capture. The recording is sent to Meta Muse for transcription into a command. KeplerV does not save the recording.</string>
 </dict>
 </plist>

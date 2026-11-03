@@ -5,7 +5,8 @@
   import type { Agent, AppState, ConnectedAccount, EmailDraft, Evidence, ExternalAgentInfo, GatewayMessageInfo, GatewaySessionInfo, Goal, KeplerEvent, MailMessage, MediaFocusState, MediaSurfaceId, Resource, ServiceProviderId, SessionVerification } from "./types";
   import { accountKey, parseAccountKey, resolveAccount } from "./experience/accountResolver";
   import { buildExternalNodes, compareOffersForSpeech, describeVerificationForSpeech, extractClaims, graphExternalY, latestPricedOffer, operatorHost, redactedCredentialFields, resolveSessionTarget, shortAgentName, summarizeSessionForSpeech, tierBadge, whyFlaggedForSpeech } from "./experience/gatewayGraph";
-  import { applyMediaCommand, createSurfaceState, duckForSpeech, LOCAL_DEMO_CAPTIONS_URL, LOCAL_DEMO_VIDEO_URL, NETFLIX_FALLBACK_LABEL, NETFLIX_URL, probeYouTubeEmbed, resolveMediaTarget, surfaceLabel, youtubeEmbedUrl } from "./experience/surfaceManager";
+  import { applyMediaCommand, createSurfaceState, duckForSpeech, resolveMediaTarget } from "./experience/surfaceManager";
+  import { buildLearningLibrary, vimeoEmbedFromUrl, youtubeEmbedFromUrl, type LearningMediaItem } from "./experience/learningLibrary";
   import { initialState, makeId, STORAGE_KEY } from "./simulation/seed";
   import { addTask, advanceSimulationClock, appendEvent, auditAction, canSpawn, createAgent, createGoal, modifyGoal, setOfflineMode, spawnSubagent, transitionAgent } from "./simulation/runtime";
   import { VoiceRecorder } from "./voice/recorder";
@@ -83,11 +84,15 @@
   let emailDraft: EmailDraft | null = null;
   let pendingEmailSend: EmailDraft | null = null;
   let resourceView = false;
+  let mediaLibraryOpen = false;
+  let selectedMediaItem: LearningMediaItem | null = null;
+  let learningItems: LearningMediaItem[] = [];
+  let visibleLearningItems: LearningMediaItem[] = [];
+  let mediaFilter: "all" | "video" | "document" | "file" | "article" = "all";
+  let mediaFrameUrl = "";
   let mediaState: MediaFocusState = createSurfaceState();
   let mediaView = false;
   let mediaSurface: MediaSurfaceId | null = null;
-  let youtubeVideoId = "";
-  let youtubeSrc = "";
   let localVideoEl: HTMLVideoElement | null = null;
   let youtubeFrameEl: HTMLIFrameElement | null = null;
   let textSize: TextSize = "large";
@@ -140,6 +145,9 @@
   const reduceMotionKey = `${STORAGE_KEY}:reduce-motion`;
   const simpleModeKey = `${STORAGE_KEY}:simple-mode`;
   const planSteps = ["Understand what you want to study", "Check classes you already took and want to skip", "Review UB’s program courses", "Find classes for language models, world models, and cognition", "Check course requirements and open questions", "Prepare your schedule PDF"];
+  const mediaFilters: Array<{ id: "all" | "video" | "document" | "file" | "article"; label: string }> = [
+    { id: "all", label: "All" }, { id: "video", label: "Videos" }, { id: "document", label: "Documents" }, { id: "file", label: "Files" }, { id: "article", label: "Web pages" },
+  ];
   const demoResources = [
     { label: "Coastal adaptation field guide", url: "https://www.nps.gov/subjects/climatechange/index.htm" },
     { label: "Open climate research", url: "https://www.noaa.gov/climate" },
@@ -249,6 +257,13 @@
   $: activeSessionSecrets = redactedCredentialFields(sessionTranscript);
   $: activeRuntimeAgents = activeGoal ? agents.filter((agent) => agent.runtime && agent.goalId === activeGoal.id) : [];
   $: activeEvidence = activeGoal ? state.evidence.filter((item) => item.goalId === activeGoal.id) : [];
+  $: learningItems = activeGoal ? [
+    ...buildLearningLibrary(activeGoal.id, state.resources, state.evidence),
+    ...(completedPlanGoalIds.includes(activeGoal.id) && isUbResearchIntent(`${activeGoal.title} ${activeGoal.description}`)
+      ? [{ id: `ub-plan-${activeGoal.id}`, goalId: activeGoal.id, title: "AI Research Schedule · Draft", kind: "document" as const, player: "pdf" as const, provider: "KeplerV plan", url: "/artifacts/ub-ai-research-schedule-draft.pdf", summary: "A course direction draft with open verification steps for your review.", createdBy: "KeplerV planning" }]
+      : []),
+  ] : [];
+  $: visibleLearningItems = mediaFilter === "all" ? learningItems : learningItems.filter((item) => item.kind === mediaFilter);
   $: activePendingApprovals = activeGoal ? pendingRuntimeApprovals.filter((item) => item.goalId === activeGoal.id) : [];
   $: pendingCount = Number(state.approval?.status === "pending") + runtimeGuardCases.filter((item) => !["closed", "inconclusive"].includes(item.status)).length + pendingRuntimeApprovals.length;
   $: if (hydrated) {
@@ -500,7 +515,12 @@
     const agents = [...runtimeAgents, ...state.agents.filter((item) => !item.runtime && !byAgentId.has(item.id))];
     const evidence: Evidence[] = (snapshot.evidence ?? []).map((item) => ({ id: item.id, goalId: item.goal_id, agentId: item.agent_id, runId: item.run_id, finding: item.finding, sourceUrl: item.source_url, quote: item.quote, createdAt: item.created_at }));
     const resourceMap = new Map(state.resources.map((item) => [item.id, item]));
-    for (const run of snapshot.agents ?? []) if (run.result?.source_url) resourceMap.set(`runtime-resource-${run.id}`, { id: `runtime-resource-${run.id}`, goalId: run.goal_id, agentId: run.agent_id, label: new URL(run.result.source_url).hostname, url: run.result.source_url });
+    for (const run of snapshot.agents ?? []) if (run.result?.source_url) {
+      try { const host = new URL(run.result.source_url).hostname; resourceMap.set(`runtime-resource-${run.id}`, { id: `runtime-resource-${run.id}`, goalId: run.goal_id, agentId: run.agent_id, label: host, url: run.result.source_url }); } catch { /* ignore malformed agent links */ }
+    }
+    for (const item of snapshot.evidence ?? []) if (/^https?:\/\//i.test(item.source_url)) {
+      try { const host = new URL(item.source_url).hostname; resourceMap.set(`runtime-evidence-${item.id}`, { id: `runtime-evidence-${item.id}`, goalId: item.goal_id, agentId: item.agent_id, label: item.finding.slice(0, 80) || host, url: item.source_url }); } catch { /* ignore malformed evidence links */ }
+    }
     const progressByGoal = new Map<string, number>();
     for (const run of snapshot.agents ?? []) progressByGoal.set(run.goal_id, Math.max(progressByGoal.get(run.goal_id) ?? 0, run.status === "completed" ? 100 : Math.min(85, run.steps * 10)));
     state = { ...state, agents, evidence: [...new Map([...evidence, ...state.evidence].map((item) => [item.id, item])).values()], resources: [...resourceMap.values()], goals: state.goals.map((goal) => ({ ...goal, progress: Math.max(goal.progress, progressByGoal.get(goal.id) ?? 0), status: progressByGoal.get(goal.id) === 100 ? "completed" : goal.status })) };
@@ -515,7 +535,7 @@
     }
     startingRuntimeRun = true;
     try {
-      const run = await invoke<RuntimeAgent>("runtime_create_run", { goalId: activeGoal.id, goalTitle: activeGoal.title, goalDescription: activeGoal.description, task: "Search the public web for relevant sources, inspect the most useful pages, and summarize three findings with exact supporting quotes and source links.", sourceUrl: runtimeSourceUrl.trim() || null, tokenBudget: runtimeTokenBudget });
+      const run = await invoke<RuntimeAgent>("runtime_create_run", { goalId: activeGoal.id, goalTitle: activeGoal.title, goalDescription: activeGoal.description, task: "Search for trustworthy sources, including useful video lessons and PDF documents when available. Inspect relevant public pages, then return concise findings with exact supporting quotes and source links. Do not invent or rehost media.", sourceUrl: runtimeSourceUrl.trim() || null, tokenBudget: runtimeTokenBudget });
       const agent = mapRuntimeAgent(run);
       state = { ...state, agents: [agent, ...state.agents.filter((item) => item.id !== agent.id)] };
       showNotice("Muse research agent started. Its real actions will appear in activity.");
@@ -748,14 +768,16 @@
   }
   function pauseYoutubeFrame(): void {
     try {
-      youtubeFrameEl?.contentWindow?.postMessage(JSON.stringify({ event: "command", func: "pauseVideo", args: [] }), "https://www.youtube-nocookie.com");
+      if (selectedMediaItem?.player === "vimeo") youtubeFrameEl?.contentWindow?.postMessage(JSON.stringify({ method: "pause" }), "https://player.vimeo.com");
+      else youtubeFrameEl?.contentWindow?.postMessage(JSON.stringify({ event: "command", func: "pauseVideo", args: [] }), "https://www.youtube-nocookie.com");
     } catch {
       /* cross-origin postMessage is best-effort; focus state is the record */
     }
   }
   function playYoutubeFrame(): void {
     try {
-      youtubeFrameEl?.contentWindow?.postMessage(JSON.stringify({ event: "command", func: "playVideo", args: [] }), "https://www.youtube-nocookie.com");
+      if (selectedMediaItem?.player === "vimeo") youtubeFrameEl?.contentWindow?.postMessage(JSON.stringify({ method: "play" }), "https://player.vimeo.com");
+      else youtubeFrameEl?.contentWindow?.postMessage(JSON.stringify({ event: "command", func: "playVideo", args: [] }), "https://www.youtube-nocookie.com");
     } catch {
       /* cross-origin postMessage is best-effort; focus state is the record */
     }
@@ -764,31 +786,19 @@
     if (except !== "local-video") localVideoEl?.pause();
     if (except !== "youtube") pauseYoutubeFrame();
   }
-  function openMediaSurface(target: MediaSurfaceId, opts: { videoId?: string } = {}): string {
-    if (target === "youtube") {
-      const probe = probeYouTubeEmbed({ iframeAllowed: typeof document !== "undefined" });
-      const candidate = (opts.videoId ?? youtubeVideoId).trim();
-      const src = youtubeEmbedUrl(candidate);
-      if (!probe.embeddable || !src) {
-        youtubeVideoId = candidate;
-        const message = candidate && !src
-          ? "That YouTube video id looks invalid. Use an 11-character video id."
-          : "Enter an 11-character YouTube video id to embed it with the official player.";
-        showNotice(message);
-        mediaSurface = "youtube"; mediaView = true; panel = null;
-        return message;
-      }
-      youtubeVideoId = candidate;
-      youtubeSrc = src;
-    }
-    const result = applyMediaCommand(mediaState, "OPEN", target);
-    mediaState = result.state;
-    if (result.ok) {
-      pauseInactiveElements(target);
-      mediaSurface = target; mediaView = true; panel = null;
-    }
-    showNotice(result.message);
-    return result.message;
+  function openMediaLibrary(): void {
+    localVideoEl?.pause(); pauseYoutubeFrame(); mediaState = applyMediaCommand(mediaState, "CLOSE_MEDIA").state;
+    mediaFilter = "all"; selectedMediaItem = null; mediaLibraryOpen = true;
+    mediaView = false; mediaSurface = null; panel = null; resourceView = false;
+  }
+  function openLearningItem(item: LearningMediaItem): void {
+    localVideoEl?.pause(); pauseYoutubeFrame(); mediaState = applyMediaCommand(mediaState, "CLOSE_MEDIA").state;
+    selectedMediaItem = item; mediaLibraryOpen = false; mediaView = true; panel = null; resourceView = false;
+    const embed = item.player === "youtube" ? youtubeEmbedFromUrl(item.url) : item.player === "vimeo" ? vimeoEmbedFromUrl(item.url) : null;
+    mediaFrameUrl = embed ?? (item.player === "pdf" || item.player === "web" ? item.url : "");
+    mediaSurface = item.player === "video-file" ? "local-video" : item.player === "youtube" || item.player === "vimeo" ? "youtube" : null;
+    if (mediaSurface) mediaState = applyMediaCommand(mediaState, "OPEN", mediaSurface).state;
+    if ((item.player === "youtube" || item.player === "vimeo") && !embed) showNotice("This video link could not be opened. Ask the agent for another source.");
   }
   function pauseMedia(target?: MediaSurfaceId | null): string {
     const result = applyMediaCommand(mediaState, "PAUSE", target ?? mediaSurface);
@@ -814,13 +824,16 @@
     const result = applyMediaCommand(mediaState, "CLOSE_MEDIA", target ?? mediaSurface);
     mediaState = result.state;
     localVideoEl?.pause(); pauseYoutubeFrame();
-    if (!target || target === mediaSurface) { mediaView = false; mediaSurface = null; }
+    if (!target || target === mediaSurface) { mediaView = false; mediaSurface = null; selectedMediaItem = null; mediaFrameUrl = ""; }
     showNotice(result.message);
     return result.message;
   }
-  function openNetflixExternally(): void {
-    void invoke("open_public_resource", { url: NETFLIX_URL, label: "Netflix" })
-      .then(() => showNotice("Netflix opened in the system browser. Embedded playback is not supported."))
+  function closeMediaLibrary(): void { mediaLibraryOpen = false; }
+  function openSelectedMediaExternally(): void {
+    if (!selectedMediaItem) return;
+    if (!/^https:\/\//i.test(selectedMediaItem.url)) { showNotice("This document is included in KeplerV. Use Download or save a copy."); return; }
+    void invoke("open_public_resource", { url: selectedMediaItem.url, label: selectedMediaItem.title })
+      .then(() => showNotice(`Opened ${selectedMediaItem?.title ?? "resource"} in the system browser.`))
       .catch((error) => showNotice(String(error)));
   }
   function pushVoiceTurn(role: string, text: string): void {
@@ -1156,14 +1169,11 @@
         return "Nothing is waiting for approval.";
       }
       case "OPEN_MEDIA": {
-        const target = resolveMediaTarget(argText("target"));
-        if (!target) return "Which media should I open: local video, YouTube, or Netflix?";
-        if (target === "youtube") {
-          const videoId = argText("video_id");
-          if (videoId) youtubeVideoId = videoId;
-          if (!youtubeVideoId.trim()) return "Which YouTube video? Give me its 11-character video id.";
-        }
-        return openMediaSurface(target, { videoId: youtubeVideoId });
+        const requested = (argText("title") ?? argText("target") ?? "").trim().toLowerCase();
+        const item = requested ? learningItems.find((entry) => entry.title.toLowerCase().includes(requested) || entry.provider.toLowerCase() === requested) : undefined;
+        if (item) { openLearningItem(item); return `Opening ${item.title}.`; }
+        openMediaLibrary();
+        return learningItems.length ? "I opened the learning library with the videos, documents, and files found for this goal." : "There are no agent sources for this goal yet. Start research and I’ll collect useful videos, documents, and files here.";
       }
       case "PAUSE_MEDIA":
         return pauseMedia(resolveMediaTarget(argText("target")));
@@ -1405,7 +1415,7 @@
 </script>
 
 <svelte:head><title>KeplerV · Intent Space</title><meta name="description" content="An experimental intent-native browser." /></svelte:head>
-<svelte:window onkeydown={(event) => { if (event.key === "Escape") { if (panel) closePanel(); else if (mediaView) closeMedia(); } }} />
+<svelte:window onkeydown={(event) => { if (event.key === "Escape") { if (panel) closePanel(); else if (mediaView) closeMedia(); else if (mediaLibraryOpen) closeMediaLibrary(); } }} />
 
 <main class="app-shell" class:panel-open={panel !== null}>
   <header class="topbar">
@@ -1455,7 +1465,7 @@
         <div class="graph-legend"><span><i class="legend-goal"></i> GOAL</span><span><i class="legend-agent"></i> AGENT</span><span><i class="legend-resource"></i> RESOURCE</span>{#if externalGraphNodes.length}<span><i class="legend-external"></i> EXTERNAL</span>{/if}</div>
       </div>
 
-      <div class="goal-ribbon"><div class="ribbon-title"><span class="ribbon-index">GOAL</span><b>{activeGoal?.title ?? "No goal selected"}</b><small>{activeGoal?.description}</small></div><div class="ribbon-progress"><div><span>DONE</span><b>{activeGoal?.progress ?? 0}%</b></div><span class="progress-track"><i style={`width:${activeGoal?.progress ?? 0}%`}></i></span></div><div class="ribbon-agents"><span>HELPERS</span><b>{goalAgents.length.toString().padStart(2, "0")}</b></div><div class="ribbon-buttons"><button onclick={assignAgent}>＋ Add helper</button><button onclick={() => panel = "resource"}>↗ Add link</button><button onclick={() => openMediaSurface("local-video")}>▶ Media</button><button onclick={() => panel = "timeline"}>Recent activity ↗</button></div></div>
+      <div class="goal-ribbon"><div class="ribbon-title"><span class="ribbon-index">GOAL</span><b>{activeGoal?.title ?? "No goal selected"}</b><small>{activeGoal?.description}</small></div><div class="ribbon-progress"><div><span>DONE</span><b>{activeGoal?.progress ?? 0}%</b></div><span class="progress-track"><i style={`width:${activeGoal?.progress ?? 0}%`}></i></span></div><div class="ribbon-agents"><span>HELPERS</span><b>{goalAgents.length.toString().padStart(2, "0")}</b></div><div class="ribbon-buttons"><button onclick={assignAgent}>＋ Add helper</button><button onclick={() => panel = "resource"}>↗ Add link</button><button onclick={openMediaLibrary}>▤ Learning library <span>{learningItems.length || ""}</span></button><button onclick={() => panel = "timeline"}>Recent activity ↗</button></div></div>
     </section>
 
   </div>
@@ -1469,20 +1479,40 @@
     </section>
   {/if}
 
-  {#if mediaView && mediaSurface}
-    <section class="media-immersive" aria-label={`Media surface: ${surfaceLabel(mediaSurface)}`}>
-      <header class="media-toolbar"><button class="media-back" onclick={() => closeMedia()}>← <span>Back to workspace</span></button><div class="media-address"><b>{surfaceLabel(mediaSurface)}</b><span>ONE AUDIBLE SURFACE · VOICE DUCKS MEDIA</span></div><div class="media-switch"><button class:media-on={mediaSurface === "local-video"} onclick={() => openMediaSurface("local-video")}>Local</button><button class:media-on={mediaSurface === "youtube"} onclick={() => openMediaSurface("youtube")}>YouTube</button><button class:media-on={mediaSurface === "netflix-fallback"} onclick={() => openMediaSurface("netflix-fallback")}>Netflix</button></div></header>
-      {#if mediaSurface === "local-video"}
-        <video class="media-video" bind:this={localVideoEl} src={LOCAL_DEMO_VIDEO_URL} controls playsinline preload="metadata" title="KeplerV local demo fixture"><track kind="captions" src={LOCAL_DEMO_CAPTIONS_URL} srclang="en" label="English" /></video>
-        <div class="media-frame-note"><span>LOCAL FIXTURE · generated test pattern, no licensed content</span><span class="media-transport"><button onclick={() => pauseMedia()}>Pause</button><button onclick={() => resumeMedia()}>Resume</button><button onclick={() => closeMedia()}>Close</button></span></div>
-      {:else if mediaSurface === "youtube"}
-        {#if youtubeSrc}<iframe class="media-frame" bind:this={youtubeFrameEl} src={youtubeSrc} title="YouTube embed" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>
-        {:else}<div class="media-prompt"><form onsubmit={(event) => { event.preventDefault(); openMediaSurface("youtube"); }}><label>YOUTUBE VIDEO ID<input bind:value={youtubeVideoId} maxlength="11" placeholder="11-character id from the video URL" /></label><button class="object-primary" type="submit">Embed with the official player</button></form><small>Official youtube-nocookie iframe player only. KeplerV never fetches or rehosts video.</small></div>{/if}
-        <div class="media-frame-note"><span>YOUTUBE EMBED · official player · capability-checked</span><span class="media-transport"><button onclick={() => pauseMedia()}>Pause</button><button onclick={() => resumeMedia()}>Resume</button><button onclick={() => closeMedia()}>Close</button></span></div>
-      {:else}
-        <div class="media-prompt"><p><b>Embedded Netflix is not supported in KeplerV.</b></p><p>Netflix uses DRM that cannot play inside this app. No workaround is attempted. Use the supported option below.</p><button class="object-primary" onclick={openNetflixExternally}>{NETFLIX_FALLBACK_LABEL} ↗</button></div>
-        <div class="media-frame-note"><span>NETFLIX · external browser only · embedded playback never claimed</span><span class="media-transport"><button onclick={() => closeMedia()}>Close</button></span></div>
-      {/if}
+  {#if mediaLibraryOpen}
+    <div class="media-library-immersive" role="dialog" aria-modal="true" aria-label="Learning library" tabindex="-1">
+      <header class="media-library-header"><button class="media-back" onclick={closeMediaLibrary}>← <span>Back to workspace</span></button><div><span>LEARNING LIBRARY</span><h2>{activeGoal?.title ?? "Saved learning"}</h2><p>{learningItems.length} videos, documents, and resources from this goal</p></div><button class="media-library-close" aria-label="Close learning library" onclick={closeMediaLibrary}>×</button></header>
+      <nav class="media-library-filters" aria-label="Filter learning resources">
+        {#each mediaFilters as filter}
+          <button class:filter-active={mediaFilter === filter.id} onclick={() => mediaFilter = filter.id}>{filter.label}<span>{filter.id === "all" ? learningItems.length : learningItems.filter((item) => item.kind === filter.id).length}</span></button>
+        {/each}
+      </nav>
+      {#if visibleLearningItems.length}
+        <div class="learning-library-grid">{#each visibleLearningItems as item}
+          <button class="learning-media-card" onclick={() => openLearningItem(item)}>
+            <span class="learning-media-type"><i>{item.kind === "video" ? "▶" : item.kind === "document" ? "▤" : item.kind === "file" ? "↓" : "↗"}</i>{item.provider}<b>{item.kind === "video" ? "VIDEO" : item.kind === "document" ? "DOCUMENT" : item.kind === "file" ? "FILE" : "WEB PAGE"}</b></span>
+            <strong>{item.title}</strong><p>{item.summary}</p>
+            {#if item.quote}<blockquote>“{item.quote}”</blockquote>{/if}
+            <span class="learning-media-source">{item.createdBy ? agents.find((agent) => agent.id === item.createdBy)?.name ?? item.createdBy : "Saved to this goal"}<i>Open ›</i></span>
+          </button>
+        {/each}</div>
+      {:else}<div class="learning-library-empty"><span>◇</span><h3>Your learning resources will appear here</h3><p>When an agent finds a useful video, document, or page, it will be added to this list with its source and a short explanation.</p>{#if runtimeStatus === "ready" && runtimeModelConfigured}<button class="object-primary" onclick={() => { closeMediaLibrary(); panel = "goal"; }}>Ask an agent to research this goal</button>{/if}</div>{/if}
+    </div>
+  {/if}
+
+  {#if mediaView && selectedMediaItem}
+    <section class="media-immersive" aria-label={`Viewing ${selectedMediaItem!.title}`}>
+      <header class="media-toolbar"><button class="media-back" onclick={() => { localVideoEl?.pause(); pauseYoutubeFrame(); mediaState = applyMediaCommand(mediaState, "CLOSE_MEDIA").state; mediaView = false; selectedMediaItem = null; mediaLibraryOpen = true; }}>← <span>Learning library</span></button><div class="media-address"><b>{selectedMediaItem!.title}</b><span>{selectedMediaItem!.provider.toUpperCase()} · {selectedMediaItem!.kind.toUpperCase()}</span></div><div class="media-switch"><button class="media-on" onclick={openSelectedMediaExternally}>Open source ↗</button></div></header>
+      <div class="learning-media-player-layout"><div class="learning-media-player">
+        {#if selectedMediaItem!.player === "youtube" || selectedMediaItem!.player === "vimeo"}
+          {#if mediaFrameUrl}<iframe class="media-frame" bind:this={youtubeFrameEl} src={mediaFrameUrl} title={selectedMediaItem!.title} allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>{:else}<div class="learning-media-unavailable"><h3>Video link unavailable</h3><p>This source does not provide a playable video link.</p><button class="secondary-wide" onclick={openSelectedMediaExternally}>Open source page ↗</button></div>{/if}
+        {:else if selectedMediaItem!.player === "video-file"}<!-- svelte-ignore a11y_media_has_caption -->
+          <video class="media-video" bind:this={localVideoEl} src={selectedMediaItem!.url} controls playsinline preload="metadata" title={selectedMediaItem!.title}></video>
+        {:else if selectedMediaItem!.player === "pdf"}<iframe class="learning-pdf-frame" src={`${mediaFrameUrl}#view=FitH`} title={`PDF: ${selectedMediaItem!.title}`}></iframe>
+        {:else if selectedMediaItem!.player === "web"}<iframe class="media-frame" src={selectedMediaItem!.url} title={selectedMediaItem!.title} referrerpolicy="no-referrer"></iframe>
+        {:else}<div class="learning-media-unavailable"><h3>{selectedMediaItem!.provider === "Netflix" ? "Continue watching with Netflix" : "Open this file"}</h3><p>{selectedMediaItem!.provider === "Netflix" ? "Playback stays in Netflix. KeplerV will open the source in your browser." : "This file is hosted by its source website."}</p><button class="object-primary" onclick={openSelectedMediaExternally}>Open {selectedMediaItem!.provider} ↗</button></div>{/if}
+      </div><aside class="learning-media-details"><span>ABOUT THIS PICK</span><h2>{selectedMediaItem!.title}</h2><p>{selectedMediaItem!.summary}</p>{#if selectedMediaItem!.quote}<blockquote>“{selectedMediaItem!.quote}”</blockquote>{/if}<div><small>PROVIDED BY</small><b>{selectedMediaItem!.createdBy ? agents.find((agent) => agent.id === selectedMediaItem!.createdBy)?.name ?? selectedMediaItem!.createdBy : "KeplerV"}</b></div><div><small>SOURCE</small><b>{new URL(selectedMediaItem!.url, window.location.href).hostname}</b></div>{#if selectedMediaItem!.player === "pdf" || selectedMediaItem!.player === "external"}<a class="learning-download" href={selectedMediaItem!.url} download={selectedMediaItem!.player === "pdf"}>Download or save a copy ↓</a>{/if}<button class="secondary-wide" onclick={openSelectedMediaExternally}>Open original source ↗</button></aside></div>
+      <footer class="media-frame-note"><span>Saved for {activeGoal?.title ?? "this workspace"}</span>{#if mediaSurface}<span class="media-transport"><button onclick={() => pauseMedia()}>Pause</button><button onclick={() => resumeMedia()}>Resume</button></span>{/if}</footer>
     </section>
   {/if}
 

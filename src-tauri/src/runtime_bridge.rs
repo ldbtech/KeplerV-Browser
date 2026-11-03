@@ -203,10 +203,17 @@ fn application_root(app: &AppHandle) -> Result<PathBuf, String> {
     if resources.join("runtime").join("main.py").is_file() {
         return Ok(resources);
     }
+    if resources.join("runtime-bundle").join("KeplerVRuntime").is_file() {
+        return Ok(resources);
+    }
     Err("KeplerV's local runtime files were not found. Reinstall the application or run it from the project folder.".into())
 }
 
 fn python_executable(root: &Path) -> String {
+    let packaged = root.join("runtime-bundle/KeplerVRuntime");
+    if packaged.is_file() {
+        return packaged.to_string_lossy().into_owned();
+    }
     if let Ok(path) = env::var("KEPLERV_PYTHON") {
         return path;
     }
@@ -388,9 +395,13 @@ fn start_locked(app: &AppHandle, slot: &mut Option<ManagedRuntime>) -> Result<Va
     let port = available_port()?;
     let base_url = format!("http://127.0.0.1:{port}");
     // Uvicorn reports bind and import failures on stdout; capture both streams until health is confirmed.
-    let mut command = Command::new(python_executable(&root));
+    let runtime_executable = python_executable(&root);
+    let packaged_runtime = runtime_executable.ends_with("/runtime-bundle/KeplerVRuntime");
+    let mut command = Command::new(runtime_executable);
+    if !packaged_runtime {
+        command.args(["-m", "runtime.main"]);
+    }
     command
-        .args(["-m", "runtime.main"])
         .current_dir(&root)
         .env_clear()
         .env("PATH", env::var("PATH").unwrap_or_default())
@@ -399,10 +410,14 @@ fn start_locked(app: &AppHandle, slot: &mut Option<ManagedRuntime>) -> Result<Va
         .env("KEPLERV_RUNTIME_TOKEN", &token)
         .env("KEPLERV_RUNTIME_PORT", port.to_string())
         .env("KEPLERV_DATA_DIR", &data_dir)
-        .env("PYTHONPATH", &root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if !packaged_runtime {
+        command.env("PYTHONPATH", &root);
+    } else {
+        command.env("PLAYWRIGHT_BROWSERS_PATH", root.join("runtime-bundle/ms-playwright"));
+    }
     let saved_config = read_model_config(app).unwrap_or_else(|| ModelConfig { provider: "meta".into(), endpoint: "https://api.meta.ai/v1".into(), model: "muse-spark-1.3".into() });
     let provider = env::var("KEPLERV_MODEL_PROVIDER").unwrap_or(saved_config.provider);
     let model = env::var("KEPLERV_MODEL_NAME").unwrap_or(saved_config.model);
@@ -430,7 +445,7 @@ fn start_locked(app: &AppHandle, slot: &mut Option<ManagedRuntime>) -> Result<Va
     if env::var("KEPLERV_DEMO_MODE").as_deref() == Ok("1") {
         command.env("KEPLERV_DEMO_MODE", "1");
     }
-    let mut child = command.spawn().map_err(|_| "Could not start Python 3.12 runtime. Install runtime/requirements.txt and select Python with KEPLERV_PYTHON if needed.".to_string())?;
+    let mut child = command.spawn().map_err(|_| "Could not start KeplerV's local runtime. Reinstall the application or check the runtime package.".to_string())?;
     let client = authorized_client()?;
     let mut ready = false;
     for _ in 0..60 {

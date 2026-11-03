@@ -1,11 +1,17 @@
 node_modules/
 dist/
 .venv/
+.packaging-venv/
+.packaging-work/
+.packaging-home/
+.packaging-pyinstaller/
+.packaging-playwright/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 src-tauri/target/
+src-tauri/runtime-bundle/
 src-tauri/gen/
 .DS_Store

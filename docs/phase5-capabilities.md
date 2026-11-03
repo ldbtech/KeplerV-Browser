@@ -8,15 +8,16 @@ paths that are not wired fail loudly instead of substituting simulation.
 
 | Surface | Status | What is real | What is not |
 | --- | --- | --- | --- |
-| Local video | Real playback of a fixture | Genuine `<video>` playback of the bundled `public/media/keplerv-demo.mp4` (ffmpeg test pattern + tone, 5 s, no licensed content) with WebVTT captions; single-audio-focus policy, voice ducking, transport controls | The clip itself is a generated fixture, not user media; actual decoding still needs a running app (`npm run desktop`) — unit gates cover the focus policy, not pixels |
-| YouTube | Real official embed | `youtube-nocookie` iframe player with capability probe and strict 11-char id validation; KeplerV never fetches or rehosts video | Requires network + a user-pasted video id (none ships); embed rendering needs a running app |
-| Netflix | External fallback only — never embedded | Labeled "Opens in system browser" button via the existing `open_public_resource` allowlist | Embedded Netflix is unsupported (Widevine DRM in a Tauri webview) and no workaround is attempted; the probe always reports non-embeddable |
+| Agent learning library | Goal-scoped list | Collects agent evidence links and saved resources into Videos, Documents, Files, and Web pages; cards show the finding, source excerpt, provider, and agent; common YouTube/Vimeo/PDF/video URLs open from the card | The current research runtime returns findings and links, not arbitrary generated file attachments; an agent-created PDF attachment needs a file-output contract |
+| YouTube / Vimeo | Link-driven official embeds | Provider URLs found by an agent are parsed into their supported player; users never paste provider IDs | Requires network and provider embed permission; blocked or private videos can be opened at their source |
+| PDF | In-app document view | Agent-linked PDFs and the existing planning draft open in the library and can be downloaded | Remote sites can block embedding; use the source link in that case |
+| Netflix | External fallback only — never embedded | A Netflix resource opens in the system browser | Embedded DRM playback is unsupported; KeplerV does not try to bypass it |
 
 Voice control (`OPEN_MEDIA` / `PAUSE_MEDIA` / `RESUME_MEDIA` / `CLOSE_MEDIA`) is
 wired end to end: `runtime/voice/intent.py` classifies the intent,
-`interpret_voice` proxies through `POST /interpret`, and `App.svelte` routes
-the result through `applyMediaCommand`. Missing targets return a clarification
-question, never a guess.
+`interpret_voice` proxies through `POST /interpret`, and `App.svelte` opens the
+selected goal's learning library. A media ID is not required; a requested title
+can open a matching item.
 
 ## Connected services (OAuth + email)
 
@@ -36,11 +37,10 @@ fabricated content, several matches → 409 with candidates, revoked/expired →
 
 ## Verification scenarios
 
-- **Scenario A — local video end-to-end** (`src/experience/scenarioA.localVideo.test.ts`,
-  vitest): bundled fixture + captions present on disk with MP4 `ftyp` magic and
-  a `WEBVTT` header; open → duck-for-speech → resume → pause → close; YouTube
-  focus switch preserves single-audio-focus; missing target asks for
-  clarification; Netflix stays non-embeddable with the fallback label.
+- **Scenario A — media and learning library** (`src/experience/learningLibrary.test.ts`,
+  vitest): normal YouTube/Vimeo links become provider embeds, PDF and direct
+  video files are classified, research evidence is grouped into the goal's
+  library, and invalid lookalike domains are rejected.
 - **Scenario B — fake-provider OAuth connect + read + revoke**
   (`runtime/tests/test_phase5_scenarios.py`, pytest): connect records metadata
   with no secrets; list/search/read/thread return FAKE-labeled fixtures;

@@ -4,7 +4,7 @@ KeplerV is a macOS Tauri 2 application organized around user goals, agent work, 
 
 ## Run the desktop app
 
-Requirements: macOS, Xcode Command Line Tools, Rust stable, Node.js 20.19+ or 22.12+, and Python 3.12+.
+Requirements for development: macOS, Xcode Command Line Tools, Rust stable, Node.js 20.19+ or 22.12+, and Python 3.12+.
 
 ```sh
 cd /Users/alidaho/Projects/keplerv/browser
@@ -23,7 +23,49 @@ npm run desktop
 
 The app starts a Python sidecar on `127.0.0.1` using a fresh, app-scoped random bearer token. Tauri stops the sidecar when the desktop process exits. Run `npm run dev` to work on the Svelte interface alone; runtime controls require the native desktop app. Build the macOS app bundle with `npm run desktop:build`.
 
-The current `.app` bundle includes the Python runtime source, but does not bundle a Python interpreter, installed Python packages, or Playwright's Chromium binary. For a packaged app, install the Python requirements and Chromium on that Mac and set `KEPLERV_PYTHON` to the Python environment that contains them. The bundled app does not yet install these dependencies automatically.
+## Build a downloadable macOS installer
+
+The release build creates a self-contained app and DMG for the architecture of the build Mac. It packages Python 3.12, the production runtime dependencies, and Playwright's headless Chromium. The first build downloads its Python packaging dependencies and Chromium, so it needs internet access and can take several minutes. The resulting DMG is large because it contains Chromium.
+
+```sh
+npm run desktop:build
+```
+
+The build currently produces an Apple Silicon DMG when run on an Apple Silicon Mac and an Intel DMG when run on an Intel Mac. Build and distribute one DMG per architecture. Apple Silicon users can run Intel apps with Rosetta, but the embedded runtime and browser are native to their build architecture.
+
+### Sign with your Apple Developer account
+
+In Xcode, open **Xcode → Settings → Accounts**, add your Apple Developer account, select your team, open **Manage Certificates**, and create a **Developer ID Application** certificate. This certificate is for apps distributed outside the Mac App Store. Check that macOS can see it:
+
+```sh
+security find-identity -v -p codesigning
+```
+
+Copy the exact `Developer ID Application: ...` identity shown there. The private key stays in your macOS Keychain; do not put it in this repository. Then build a signed app and DMG:
+
+```sh
+export APPLE_SIGNING_IDENTITY='Developer ID Application: Your Name (TEAMID)'
+npm run desktop:build
+```
+
+To notarize the DMG, first create a notarytool Keychain profile once. Find your Team ID in the Apple Developer account membership details, create an app-specific password at account.apple.com, then run:
+
+```sh
+xcrun notarytool store-credentials KeplerVNotary \
+  --apple-id 'your-apple-id@example.com' \
+  --team-id 'TEAMID' \
+  --password 'app-specific-password'
+```
+
+The password is stored in your login Keychain. Then notarize and staple the DMG ticket:
+
+```sh
+export APPLE_SIGNING_IDENTITY='Developer ID Application: Your Name (TEAMID)'
+export APPLE_NOTARY_PROFILE='KeplerVNotary'
+npm run desktop:notarize
+```
+
+The notarization command submits the built DMG to Apple and waits for its result. A successful notarization is stapled to the DMG so Gatekeeper can verify it when the Mac is offline. These Apple steps require an active Developer Program membership and the Account Holder or an Admin who can create signing assets.
 
 `.env.example` lists the supported environment variable names. It is a template, not loaded automatically; set the variables in the shell that launches KeplerV. `KEPLERV_PYTHON` can point the native app to a specific Python executable if you do not use the project's `.venv`.
 
@@ -45,7 +87,7 @@ The model cannot grant itself permissions. AIP checks agent/run identity, goal, 
 | `MODEL_API_KEY` | unset | Meta Model API credential; required for live Muse calls |
 | `KEPLERV_MODEL_PROVIDER` | `meta` | Runtime adapter selection; only `meta` has a live adapter in this milestone |
 | `KEPLERV_MODEL_NAME` | `muse-spark-1.3` | Model identifier sent to the Meta API |
-| `KEPLERV_PYTHON` | project `.venv`, then Python 3.12, then `python3` | Runtime interpreter override |
+| `KEPLERV_PYTHON` | project `.venv`, then Python 3.12, then `python3` | Development runtime interpreter override; packaged builds use their embedded runtime |
 
 Provider settings can connect Meta Muse, OpenAI-compatible services, Anthropic, Gemini, DeepSeek, Kimi, OpenRouter, Groq, Mistral, Ollama, LM Studio, and compatible local endpoints. Cloud connections are checked against the provider's available models before their keys are saved in Keychain. OpenAI-compatible services use Chat Completions; Anthropic, Gemini, and ChatGPT use their respective request formats. ChatGPT uses OpenAI's published local-app OAuth flow, including PKCE, state/nonce checks, signed identity-token validation, keychain token storage, refresh, and optional plan-usage authorization. The runtime selects the connected provider and model for new research runs.
 
@@ -132,11 +174,12 @@ Then open any goal and use the "Use fictional demo fixtures" button to point res
 | Voice approvals | Spoken requests open the exact pending approval and read its details; confirmation stays a deliberate button action in the goal panel and AIP makes the final decision |
 | Synthetic demo environment | Fictional KeplerV University fixtures served from loopback; AIP exemption is path-scoped to `/demo/`, requires explicit `KEPLERV_DEMO_MODE=1`, and keeps capability and approval checks |
 | Tracing and replay | `GET /runs/{id}/trace` exports events, evidence, cases, and stage latencies; `runtime.experiments.replay` verifies and plays traces back labeled REPLAY without model calls |
-| UB schedule PDF | Existing guided product demonstration; it is not produced by the research runtime |
+| Learning library | Goal-scoped collection of agent source links, findings, PDFs, direct video files, and web pages; cards show the finding, source excerpt, provider, and agent |
+| UB schedule PDF | Existing guided planning draft, available in the learning library after its planning flow completes; it is not produced by the research runtime |
 | Legacy sample goals and agents | Existing workspace examples remain local; Guard cases now come from actual runtime AIP decisions |
-| Local video | Real `<video>` playback of a bundled generated fixture (`public/media/keplerv-demo.mp4` + WebVTT captions, no licensed content) with single-audio-focus, voice ducking, and transport controls; voice `OPEN/PAUSE/RESUME/CLOSE_MEDIA` wired via `/interpret` |
-| YouTube | Real official `youtube-nocookie` iframe embed with capability probe and 11-char id validation; requires a user-pasted id (none ships) and network; KeplerV never fetches or rehosts video |
-| Netflix | External system-browser fallback only; embedded playback is unsupported (DRM) and no workaround is attempted — never claimed |
+| YouTube / Vimeo | Official provider embeds created from source URLs found by the agent; users never paste IDs; blocked videos can be opened at their source |
+| Direct video files and PDFs | HTTPS `.mp4`, `.webm`, `.mov`, and `.pdf` links open in the in-app viewer when the host permits it; files can be downloaded from their source |
+| Netflix | Opens in the system browser; embedded playback is unsupported (DRM) and no workaround is attempted |
 | Service accounts (OAuth) | Real PKCE flow (S256, state/nonce, loopback callback, refresh, revoke) with keychain token storage under `oauth:{provider}:{account}`; public client IDs only via `KEPLERV_OAUTH_CLIENT_ID_*` or `oauth-client-ids.json`; no IDs ship so live sign-in is unexercised; Python holds metadata only, never tokens |
 | Email read | Fake-mail fixture (3 fictional messages, every payload FAKE-labeled) served over token-authed `/mail/*` routes; Gmail client is real but fails closed as not-connected (keychain tokens not bridged to Python); Outlook is a labeled skeleton; ambiguous references return candidates, never auto-pick |
 | Email send | Fake-mail outbox only, after AIP grant plus explicit approval; voice can only request approval; real-provider send fails loudly with "Nothing was sent" — no live send path by design |
