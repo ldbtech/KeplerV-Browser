@@ -34,6 +34,7 @@ def record_gateway_event(
     if guard_observer is not None and kind in {
         SSRF_BLOCKED, LIMIT_EXCEEDED, VALIDATION_FAILED, TIMEOUT,
         "gateway.provenance_unknown_session",
+        "gateway.external_contradiction",
     }:
         try:
             guard_observer.observe(event)

@@ -48,6 +48,16 @@ EXTRA_FORBIDDEN_OUTBOUND_KEYS = frozenset({
 
 FORBIDDEN_OUTBOUND_KEYS = SECRET_FIELD_NAMES | EXTRA_FORBIDDEN_OUTBOUND_KEYS
 
+#: Single key parts that forbid a field even inside a compound name, so
+#: renamed variants (``account_token``, ``browser_session_id``) still match.
+#: Merchant action payloads (action/product_id/quantity/max_price_credits)
+#: contain none of these parts.
+FORBIDDEN_KEY_PARTS = frozenset({
+    "token", "tokens", "secret", "secrets", "password", "passwd",
+    "credential", "credentials", "cookie", "cookies", "account", "accounts",
+    "email", "session", "sessions", "keychain",
+})
+
 MAX_OUTBOUND_BYTES = 8192
 MAX_DISCOVERY_BASES = 8
 
@@ -88,13 +98,22 @@ class GatewayVerifyArgs(BaseModel):
     request_merchant_evidence: bool = False
 
 
+def _key_is_forbidden(key: str) -> bool:
+    lowered = str(key).casefold()
+    if lowered in FORBIDDEN_OUTBOUND_KEYS:
+        return True
+    parts = [part for part in "".join(
+        char if char.isalnum() else " " for char in lowered).split() if part]
+    return any(part in FORBIDDEN_KEY_PARTS for part in parts)
+
+
 def find_forbidden_keys(value: Any, trail: str = "") -> list[str]:
     """Collect dotted paths of forbidden outbound field names (names only)."""
     found: list[str] = []
     if isinstance(value, dict):
         for key, item in value.items():
             path = f"{trail}{key}"
-            if str(key).casefold() in FORBIDDEN_OUTBOUND_KEYS:
+            if _key_is_forbidden(key):
                 found.append(path)
             found.extend(find_forbidden_keys(item, f"{path}."))
     elif isinstance(value, list):

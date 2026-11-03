@@ -27,6 +27,18 @@ from runtime.connectors.base import (
 from runtime.connectors.fake_adapter import FakeMailAdapter
 from runtime.connectors.gmail import GmailConnector
 from runtime.connectors.outlook import OutlookConnector
+from runtime.gateway.registry import ExternalAgentRegistry
+from runtime.gateway.sessions import GatewaySessionStore
+from runtime.gateway.tools import (
+    GATEWAY_TOOL_NAMES,
+    GatewayCloseSessionArgs,
+    GatewayDataMinimizationError,
+    GatewayDiscoverArgs,
+    GatewayOpenSessionArgs,
+    GatewaySendArgs,
+    GatewayTools,
+    GatewayVerifyArgs,
+)
 from runtime.services.fake_services import FakeServiceAdapter
 from runtime.services.permissions import REVOKE_ACTION, grant_to, revoke_from
 from runtime.services.registry import STATUS_CONNECTED, ServiceRegistry
@@ -66,6 +78,11 @@ WIRE_TO_CANONICAL = {
     "github_publish": "github.publish",
     "media_open": "media.open",
     "media_control": "media.control",
+    "gateway_discover": "gateway.discover",
+    "gateway_open_session": "gateway.open_session",
+    "gateway_close_session": "gateway.close_session",
+    "gateway_send": "gateway.send",
+    "gateway_verify": "gateway.verify",
 }
 ARG_MODELS: dict[str, type[BaseModel]] = {
     "web.search": SearchArgs,
@@ -92,6 +109,11 @@ ARG_MODELS: dict[str, type[BaseModel]] = {
     "github.publish": GithubPublishArgs,
     "media.open": MediaOpenArgs,
     "media.control": MediaControlArgs,
+    "gateway.discover": GatewayDiscoverArgs,
+    "gateway.open_session": GatewayOpenSessionArgs,
+    "gateway.close_session": GatewayCloseSessionArgs,
+    "gateway.send": GatewaySendArgs,
+    "gateway.verify": GatewayVerifyArgs,
 }
 TOOL_NAMES = list(WIRE_TO_CANONICAL.values())
 MAX_RESEARCH_PAGES = 2
@@ -135,6 +157,9 @@ class RuntimeService:
         service_registry: ServiceRegistry | None = None,
         mail_connectors: dict[str, Any] | None = None,
         service_adapter: FakeServiceAdapter | None = None,
+        gateway_transport: Any | None = None,
+        gateway_fixture_allowlist: set[str] | None = None,
+        gateway_fixture_token: str | None = None,
     ):
         self.store = store or RuntimeStore()
         self.guard_observer = GuardObserver(self.store)
@@ -142,6 +167,10 @@ class RuntimeService:
         self.service_registry = service_registry
         self._mail_connectors = mail_connectors
         self._service_adapter = service_adapter
+        self._gateway_transport = gateway_transport
+        self._gateway_fixture_allowlist = set(gateway_fixture_allowlist or set())
+        self._gateway_fixture_token = gateway_fixture_token
+        self._gateway_tools_cache: GatewayTools | None = None
         self.guard_detective = GuardDetective(self.store, self.providers)
         self.guard_interrogator = GuardInterrogator(self.store, self.providers)
         self.guard_adjudicator = GuardAdjudicator(self.store, self.providers)
@@ -170,6 +199,65 @@ class RuntimeService:
         if self._service_adapter is None:
             self._service_adapter = FakeServiceAdapter()
         return self._service_adapter
+
+    def _gateway_tools(self) -> GatewayTools:
+        """Lazily bound local-agent gateway tools (Phase 6 M4).
+
+        Sessions share the runtime sqlite file; the agent registry defaults
+        to ``KEPLERV_DATA_DIR/gateway/agents.json``. The optional transport
+        override exists for socket-free fixture tests; production traffic
+        always uses real HTTPS through the Trust Gateway.
+        """
+        if self._gateway_tools_cache is None:
+            sessions = GatewaySessionStore(self.store.db_path)
+            registry = ExternalAgentRegistry()
+            self._gateway_tools_cache = GatewayTools(
+                self.store, sessions, registry,
+                guard_observer=self.guard_observer,
+                transport=self._gateway_transport,
+                fixture_allowlist=set(self._gateway_fixture_allowlist),
+                fixture_token=self._gateway_fixture_token,
+            )
+        return self._gateway_tools_cache
+
+    async def execute_gateway_tool(self, run: dict[str, Any], name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Run a gateway.* tool after AIP authorized it.
+
+        All cross-boundary traffic goes through the Trust Gateway; outbound
+        payloads carrying account tokens or browser sessions are refused by
+        data minimization, and every merchant reply is untrusted data.
+        """
+        tools = self._gateway_tools()
+        try:
+            if name == "gateway.discover":
+                result = await tools.discover_agents(run, arguments["bases"])
+            elif name == "gateway.open_session":
+                result = await tools.open_session(
+                    run, arguments["external_agent_id"],
+                    label=arguments.get("label", "live"),
+                    max_messages=arguments.get("max_messages", 50))
+            elif name == "gateway.close_session":
+                result = await tools.close_session(run, arguments["session_id"])
+                if not result.get("ok", True):
+                    return {"ok": False, "error": str(result.get("error", "Unknown gateway session."))}
+            elif name == "gateway.send":
+                result = await tools.send_message(
+                    run, arguments["session_id"], arguments.get("payload") or {})
+            elif name == "gateway.verify":
+                result = await tools.request_evidence(
+                    run, arguments["session_id"], product_id=arguments["product_id"],
+                    asserted_price_credits=arguments.get("asserted_price_credits"),
+                    claim_text=arguments.get("claim_text"),
+                    request_merchant_evidence=bool(arguments.get("request_merchant_evidence", False)))
+            else:
+                return {"ok": False, "error": "This gateway tool is not available."}
+        except GatewayDataMinimizationError as exc:
+            return {"ok": False, "error": str(exc)[:500]}
+        except Exception as exc:  # gateway/discovery/SSRF failures stay tool errors
+            return {"ok": False, "error": str(exc)[:500]}
+        if isinstance(result, dict):
+            return {"ok": True, **result}
+        return {"ok": True, "result": result}
 
     def grant_service_access(self, run_id: str, permission: str) -> dict[str, Any]:
         """Grant one exact service permission to one agent run (one goal).
@@ -903,6 +991,13 @@ class RuntimeService:
                 else:
                     self._event(run["id"], "tool.execution.completed", "error", {"call_id": call_id, "summary": str(send_result.get("error", ""))[:300]}, name)
                 return send_result
+            elif name in GATEWAY_TOOL_NAMES:
+                gateway_result = await self.execute_gateway_tool(run, name, parsed_args)
+                if gateway_result.get("ok"):
+                    self._event(run["id"], "tool.execution.completed", "success", {"call_id": call_id, "summary": f"{name} completed"}, name)
+                else:
+                    self._event(run["id"], "tool.execution.completed", "error", {"call_id": call_id, "summary": str(gateway_result.get("error", ""))[:300]}, name)
+                return gateway_result
             elif name in SERVICE_TOOLS:
                 service_result = await self.execute_service_tool(run, name, parsed_args)
                 if service_result.get("ok"):

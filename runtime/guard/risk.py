@@ -8,6 +8,20 @@ from runtime.aip.policy import SERVICE_TOOLS
 def assess_rule_risk(event: dict[str, Any]) -> tuple[str, str, str] | None:
     """Deterministic high-signal screening; model judgments never replace AIP policy."""
     event_type = event.get("type")
+    if event_type == "federation.decision" and event.get("status") == "denied":
+        payload = event.get("payload", {})
+        if payload.get("guard_review") or payload.get("sensitive_scopes"):
+            return "high", "federated_sensitive_denied", (
+                "A sensitive external request was denied at the federated boundary "
+                "and flagged for Guard review."
+            )
+        return "medium", "federated_denied", (
+            "A federated external request was denied: unauthenticated origin or uncovered scope."
+        )
+    if event_type == "gateway.external_contradiction":
+        return "medium", "external_contradiction", (
+            "An external exchange contradicts trusted catalog or ledger evidence."
+        )
     if event_type == "gateway.ssrf_blocked":
         return "high", "gateway_ssrf_blocked", (
             "The Trust Gateway blocked an external-agent endpoint or redirect as an SSRF risk."

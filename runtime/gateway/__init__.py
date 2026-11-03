@@ -20,16 +20,20 @@ from runtime.gateway.client import (
 from runtime.gateway.registry import ExternalAgentRegistry
 from runtime.gateway.sessions import GatewaySessionStore
 from runtime.gateway.schemas import GatewayMessage
+from runtime.gateway.tools import GATEWAY_TOOL_NAMES, GatewayDataMinimizationError, GatewayTools
 
 __all__ = [
     "BudgetExceeded",
     "ExternalAgentRegistry",
+    "GATEWAY_TOOL_NAMES",
     "GatewayAuthError",
     "GatewayCancelled",
+    "GatewayDataMinimizationError",
     "GatewayMessage",
     "GatewayRateLimited",
     "GatewaySSRFBlocked",
     "GatewayTimeout",
+    "GatewayTools",
     "GatewayValidationError",
     "GatewaySessionStore",
     "TrustGateway",
