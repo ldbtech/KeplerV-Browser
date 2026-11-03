@@ -345,6 +345,44 @@ def create_app(service: RuntimeService | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Gateway session not found.")
         return {"session_id": session_id, "messages": sessions.list_transcript(session_id)}
 
+    @app.get("/gateway/sessions/{session_id}/verification")
+    async def verify_gateway_session(session_id: str, request: Request, _: None = Depends(authenticated)):
+        from runtime.guard.external_investigation import investigate_external_exchange
+        service = request.app.state.runtime_service
+        sessions, _ = _gateway_stores(service)
+        session = sessions.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Gateway session not found.")
+        transcript = sessions.list_transcript(session_id)
+        report = investigate_external_exchange(
+            session=session, transcript=transcript,
+            ledger_events=service.store.list_events(),
+        )
+        return {
+            "session_id": session_id,
+            "external_agent_id": session["external_agent_id"],
+            "analysis_label": report["analysis_label"],
+            "classifier_label": report["classifier_label"],
+            "classification": report["classification"],
+            "verdicts": report["verdicts"],
+            "contradictions": report["contradictions"],
+            "inbound_findings": report["inbound_findings"],
+            "follow_up_questions": report["follow_up_questions"],
+            "uncertainties": report["uncertainties"],
+            "abstained": report["abstained"],
+        }
+
+    @app.post("/gateway/sessions/{session_id}/close")
+    async def close_gateway_session(session_id: str, request: Request, _: None = Depends(authenticated)):
+        sessions, _ = _gateway_stores(request.app.state.runtime_service)
+        session = sessions.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Gateway session not found.")
+        if session["status"] != "open":
+            return {"session_id": session_id, "status": session["status"]}
+        updated = sessions.close_session(session_id)
+        return {"session_id": session_id, "status": (updated or {}).get("status", "closed")}
+
     return app
 
 

@@ -17,6 +17,8 @@ IntentType = Literal[
     "OPEN_SERVICE", "SEARCH_EMAIL", "READ_EMAIL", "PREPARE_EMAIL_DRAFT",
     "REQUEST_SEND_EMAIL", "OPEN_MEDIA", "PAUSE_MEDIA", "RESUME_MEDIA",
     "CLOSE_MEDIA", "SHOW_SERVICE_PERMISSIONS", "REVOKE_AGENT_SERVICE_ACCESS",
+    "WHO_IS_TALKING_TO", "VERIFY_OFFER", "WHY_FLAGGED", "STOP_TALKING_TO",
+    "COMPARE_OFFERS",
 ]
 
 INTENT_TYPES = list(IntentType.__args__)
@@ -32,6 +34,8 @@ class VoiceContext(BaseModel):
     cases: list[dict[str, Any]] = Field(default_factory=list, max_length=40)
     accounts: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
     messages: list[dict[str, Any]] = Field(default_factory=list, max_length=40)
+    sessions: list[dict[str, Any]] = Field(default_factory=list, max_length=40)
+    external_agents: list[dict[str, Any]] = Field(default_factory=list, max_length=40)
     selection: dict[str, Any] = Field(default_factory=dict)
     recent_events: list[str] = Field(default_factory=list, max_length=12)
     conversation: list[dict[str, str]] = Field(default_factory=list, max_length=8)
@@ -63,14 +67,14 @@ class InterpretationError(RuntimeError):
 
 _SYSTEM_PROMPT = """You are KeplerV's intent interpreter. Convert one spoken command into a validated structured intent.
 
-Intent types: CREATE_GOAL (new objective; set args.start_research true when the user asks to research, find, or investigate something), MODIFY_GOAL (change title, description, constraints, or tasks of an existing goal), START_AGENT (begin research for a goal), PAUSE_AGENT, RESUME_AGENT, STOP_AGENT, GET_STATUS (progress or status of a goal or agent), INSPECT_RESOURCE (open a web resource), SHOW_EVIDENCE (focus a finding), OPEN_INVESTIGATION (open a Guard case), REQUEST_EXPLANATION (why something happened, using case records), REQUEST_APPROVAL_DETAILS (describe a pending approval), APPROVE_ACTION, DENY_ACTION, CHANGE_APPEARANCE (theme or display), CONNECT_ACCOUNT (connect a gmail/outlook/fake-mail account; args {provider, email}), DISCONNECT_ACCOUNT (args {provider, email}), LIST_CONNECTED_ACCOUNTS, OPEN_SERVICE (open the services surface; args {provider}), SEARCH_EMAIL (args {query, provider?, email?}), READ_EMAIL (args {message_id?, provider?, email?}; use target_id for a listed message), PREPARE_EMAIL_DRAFT (args {to, subject?, body?}; prepares only, never sends), REQUEST_SEND_EMAIL (asks approval to send a draft; never sends by voice), OPEN_MEDIA (args {target: local-video|youtube|netflix, video_id?}), PAUSE_MEDIA, RESUME_MEDIA, CLOSE_MEDIA (args {target?}), SHOW_SERVICE_PERMISSIONS (args {provider?, email?}), REVOKE_AGENT_SERVICE_ACCESS (args {provider?, email?}; needs explicit account confirmation).
+Intent types: CREATE_GOAL (new objective; set args.start_research true when the user asks to research, find, or investigate something), MODIFY_GOAL (change title, description, constraints, or tasks of an existing goal), START_AGENT (begin research for a goal), PAUSE_AGENT, RESUME_AGENT, STOP_AGENT, GET_STATUS (progress or status of a goal or agent), INSPECT_RESOURCE (open a web resource), SHOW_EVIDENCE (focus a finding), OPEN_INVESTIGATION (open a Guard case), REQUEST_EXPLANATION (why something happened, using case records), REQUEST_APPROVAL_DETAILS (describe a pending approval), APPROVE_ACTION, DENY_ACTION, CHANGE_APPEARANCE (theme or display), CONNECT_ACCOUNT (connect a gmail/outlook/fake-mail account; args {provider, email}), DISCONNECT_ACCOUNT (args {provider, email}), LIST_CONNECTED_ACCOUNTS, OPEN_SERVICE (open the services surface; args {provider}), SEARCH_EMAIL (args {query, provider?, email?}), READ_EMAIL (args {message_id?, provider?, email?}; use target_id for a listed message), PREPARE_EMAIL_DRAFT (args {to, subject?, body?}; prepares only, never sends), REQUEST_SEND_EMAIL (asks approval to send a draft; never sends by voice), OPEN_MEDIA (args {target: local-video|youtube|netflix, video_id?}), PAUSE_MEDIA, RESUME_MEDIA, CLOSE_MEDIA (args {target?}), SHOW_SERVICE_PERMISSIONS (args {provider?, email?}), REVOKE_AGENT_SERVICE_ACCESS (args {provider?, email?}; needs explicit account confirmation), WHO_IS_TALKING_TO (which external agents have gateway sessions; target_id may name one session or agent), VERIFY_OFFER (check the latest offer in a session against verification records; target_id names the session), WHY_FLAGGED (why a session or exchange was flagged; target_id names the session), STOP_TALKING_TO (close a gateway session; target_id names the session; needs explicit human confirmation in the UI, never executes from voice alone), COMPARE_OFFERS (compare the latest priced offers across sessions; no target needed).
 
 Rules:
-- target_id must be an exact id from the supplied context, or null. Never invent identifiers. Message ids come from context.messages, account refs from context.accounts (email or provider:email).
-- Resolve references ("that agent", "the second paper", "the one working on enrollment", "my gmail", "that email about enrollment") using the selection, then recency, then name matches. Evidence items are numbered in presentation order starting at 1.
-- If the target is genuinely ambiguous between equally plausible entities, set needs_clarification true with a short clarification_question and do not choose. Never silently pick between several accounts.
+- target_id must be an exact id from the supplied context, or null. Never invent identifiers. Message ids come from context.messages, account refs from context.accounts (email or provider:email), session ids from context.sessions, external agent ids from context.external_agents.
+- Resolve references ("that agent", "the second paper", "the one working on enrollment", "my gmail", "that email about enrollment", "that merchant", "the flagged session", "the shady one") using the selection, then recency, then name matches. Evidence items are numbered in presentation order starting at 1.
+- If the target is genuinely ambiguous between equally plausible entities, set needs_clarification true with a short clarification_question and do not choose. Never silently pick between several accounts or several sessions.
 - CREATE_GOAL needs args {title, description, start_research}; MODIFY_GOAL needs args describing the change; CHANGE_APPEARANCE needs args {theme: light|dark|system}; CONNECT_ACCOUNT needs args {provider}; SEARCH_EMAIL needs args {query}; PREPARE_EMAIL_DRAFT needs args {to}; OPEN_MEDIA needs args {target}.
-- REQUEST_SEND_EMAIL and REVOKE_AGENT_SERVICE_ACCESS always need explicit human confirmation in the UI; they never execute from voice alone.
+- REQUEST_SEND_EMAIL, REVOKE_AGENT_SERVICE_ACCESS, and STOP_TALKING_TO always need explicit human confirmation in the UI; they never execute from voice alone.
 - summary_for_speech is one short sentence confirming the understood action, or the clarification question.
 - Return JSON only matching the schema."""
 
@@ -94,10 +98,14 @@ _CLARIFICATION_QUESTIONS = {
 def _known_ids(context: VoiceContext) -> set[str]:
     known: set[str] = set()
     for item in (*context.goals, *context.agents, *context.evidence, *context.resources,
-                 *context.approvals, *context.cases, *context.messages):
+                 *context.approvals, *context.cases, *context.messages,
+                 *context.sessions, *context.external_agents):
         value = item.get("id")
         if isinstance(value, str) and value:
             known.add(value)
+        agent_id = item.get("agent_id")
+        if isinstance(agent_id, str) and agent_id:
+            known.add(agent_id)
     for account in context.accounts:
         email = account.get("email")
         provider = account.get("provider")

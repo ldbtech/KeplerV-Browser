@@ -18,6 +18,15 @@ export interface MailMessage { id: string; thread_id?: string; provider?: string
 export interface MailAccountRef { provider?: string; email?: string; }
 export interface EmailDraft { to: string; subject: string; body: string; accountEmail?: string; }
 
+export type GatewayIdentityStatus = "verified" | "self_declared" | "unknown" | "suspected";
+export type GatewaySessionStatus = "open" | "closed" | "cancelled";
+export interface ExternalAgentInfo { agent_id: string; endpoint: string; identity_status: GatewayIdentityStatus; capabilities_declared: string[]; capabilities_observed: string[]; provenance: { asserted_by: string; asserted_at: string; evidence_refs: string[] }; reliability: Record<string, number>; }
+export interface GatewaySessionInfo { id: string; run_id: string; agent_id: string; external_agent_id: string; endpoint: string; status: GatewaySessionStatus; label: string; messages_sent: number; messages_received: number; tokens_used: number; created_at: string; updated_at: string; }
+export interface GatewayMessageInfo { id: string; message_id: string; reply_to?: string | null; direction: string; sender: string; recipient: string; kind: string; label: string; untrusted: boolean; payload: Record<string, unknown>; created_at: string; }
+export interface ClaimRecord { id: string; kind: string; summary: string; product_id?: string; message_id: string; statement_ref: string; }
+export interface VerificationResultInfo { claim: ClaimRecord; verdict: string; reason: string; evidence_refs: string[]; }
+export interface SessionVerification { session_id: string; external_agent_id: string; analysis_label: string; classifier_label: string; classification: { classification: string; rationale: string; evidence_refs: string[]; abstained: boolean }; verdicts: VerificationResultInfo[]; contradictions: Array<{ id: string; kind: string; detail: string; evidence_refs: string[] }>; inbound_findings: Array<{ path: string; kind: string; message_id?: string }>; follow_up_questions: Array<{ issue_via: string; rationale: string }>; uncertainties: string[]; abstained: boolean; }
+
 export type MediaSurfaceId = "local-video" | "youtube" | "netflix-fallback";
 export type MediaCommand = "OPEN" | "PAUSE" | "RESUME" | "CLOSE_MEDIA";
 export interface CapabilityResult { embeddable: boolean; reason: string; fallbackLabel?: string; }

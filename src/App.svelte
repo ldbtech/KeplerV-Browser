@@ -2,8 +2,9 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import type { Agent, AppState, ConnectedAccount, EmailDraft, Evidence, Goal, KeplerEvent, MailMessage, MediaFocusState, MediaSurfaceId, Resource, ServiceProviderId } from "./types";
+  import type { Agent, AppState, ConnectedAccount, EmailDraft, Evidence, ExternalAgentInfo, GatewayMessageInfo, GatewaySessionInfo, Goal, KeplerEvent, MailMessage, MediaFocusState, MediaSurfaceId, Resource, ServiceProviderId, SessionVerification } from "./types";
   import { accountKey, parseAccountKey, resolveAccount } from "./experience/accountResolver";
+  import { buildExternalNodes, compareOffersForSpeech, describeVerificationForSpeech, extractClaims, graphExternalY, latestPricedOffer, operatorHost, redactedCredentialFields, resolveSessionTarget, shortAgentName, summarizeSessionForSpeech, tierBadge, whyFlaggedForSpeech } from "./experience/gatewayGraph";
   import { applyMediaCommand, createSurfaceState, duckForSpeech, LOCAL_DEMO_CAPTIONS_URL, LOCAL_DEMO_VIDEO_URL, NETFLIX_FALLBACK_LABEL, NETFLIX_URL, probeYouTubeEmbed, resolveMediaTarget, surfaceLabel, youtubeEmbedUrl } from "./experience/surfaceManager";
   import { initialState, makeId, STORAGE_KEY } from "./simulation/seed";
   import { addTask, advanceSimulationClock, appendEvent, auditAction, canSpawn, createAgent, createGoal, modifyGoal, setOfflineMode, spawnSubagent, transitionAgent } from "./simulation/runtime";
@@ -15,7 +16,7 @@
   type IntentStep = "idle" | "listening" | "captured" | "interpreting" | "intent_ready" | "unavailable";
   type PlanPhase = "idle" | "running" | "complete";
   type TextSize = "standard" | "large" | "extra-large";
-  type Panel = "settings" | "providers" | "timeline" | "create_goal" | "resource" | "resource_detail" | "goal" | "agent" | "approval" | "guard" | null;
+  type Panel = "settings" | "providers" | "timeline" | "create_goal" | "resource" | "resource_detail" | "goal" | "agent" | "approval" | "guard" | "session" | null;
   type MenuItem = "intent" | "agents" | "activity" | "guard" | "providers" | "settings";
   type RuntimeEvent = { id: string; sequence: number; run_id: string; agent_id: string; goal_id: string; type: string; status: string; tool?: string; payload: Record<string, unknown>; timestamp: string };
   type RuntimeDetectiveReport = { summary: string; assessment: string; findings: Array<{ claim: string; classification: string; evidence_ids: string[]; explanation: string }>; uncertainties: string[]; recommended_next_step: string };
@@ -39,6 +40,15 @@
   let pendingRuntimeApprovals: Array<{ runId: string; callId: string; goalId: string; tool: string; arguments: Record<string, unknown> }> = [];
   let runtimeGuardCases: RuntimeGuardCase[] = [];
   let selectedGuardCaseId = "";
+  let gatewayAgents: ExternalAgentInfo[] = [];
+  let gatewaySessions: GatewaySessionInfo[] = [];
+  let gatewayFetchedAt = 0;
+  let gatewayLoading = false;
+  let selectedSessionId = "";
+  let sessionTranscript: GatewayMessageInfo[] = [];
+  let sessionVerification: SessionVerification | null = null;
+  let sessionDetailLoading = false;
+  let sessionDetailError = "";
   let investigatingCaseId = "";
   let interviewingCaseId = "";
   let adjudicatingCaseId = "";
@@ -231,6 +241,12 @@
   $: activeGoalGuardCase = runtimeGuardCases.find((item) => item.goal_id === activeGoal?.id) ?? null;
   $: activeGuardAgent = activeGuardCase ? agents.find((item) => item.id === activeGuardCase.agent_id && item.runtime) ?? null : null;
   $: goalAgents = activeGoal ? agents.filter((agent) => agent.goalId === activeGoal.id) : [];
+  $: goalGatewaySessions = activeGoal ? gatewaySessions.filter((session) => agents.some((agent) => agent.runId === session.run_id && agent.goalId === activeGoal.id)) : [];
+  $: externalGraphNodes = buildExternalNodes(goalGatewaySessions, gatewayAgents);
+  $: activeSession = gatewaySessions.find((item) => item.id === selectedSessionId) ?? null;
+  $: activeSessionAgent = activeSession ? gatewayAgents.find((item) => item.agent_id === activeSession.external_agent_id) ?? null : null;
+  $: activeSessionClaims = extractClaims(sessionTranscript);
+  $: activeSessionSecrets = redactedCredentialFields(sessionTranscript);
   $: activeRuntimeAgents = activeGoal ? agents.filter((agent) => agent.runtime && agent.goalId === activeGoal.id) : [];
   $: activeEvidence = activeGoal ? state.evidence.filter((item) => item.goalId === activeGoal.id) : [];
   $: activePendingApprovals = activeGoal ? pendingRuntimeApprovals.filter((item) => item.goalId === activeGoal.id) : [];
@@ -489,6 +505,7 @@
     for (const run of snapshot.agents ?? []) progressByGoal.set(run.goal_id, Math.max(progressByGoal.get(run.goal_id) ?? 0, run.status === "completed" ? 100 : Math.min(85, run.steps * 10)));
     state = { ...state, agents, evidence: [...new Map([...evidence, ...state.evidence].map((item) => [item.id, item])).values()], resources: [...resourceMap.values()], goals: state.goals.map((goal) => ({ ...goal, progress: Math.max(goal.progress, progressByGoal.get(goal.id) ?? 0), status: progressByGoal.get(goal.id) === 100 ? "completed" : goal.status })) };
     mergeRuntimeEvents(snapshot.events ?? []);
+    void refreshGatewayOverview();
   }
   async function startMuseResearch() {
     if (!activeGoal || !runtimeModelConfigured || startingRuntimeRun) return;
@@ -515,6 +532,53 @@
   async function resolveRuntimeApproval(item: (typeof pendingRuntimeApprovals)[number], action: "approve" | "deny") {
     try { await invoke("runtime_control", { runId: item.runId, action, callId: item.callId }); }
     catch (error) { showNotice(error instanceof Error ? error.message : String(error)); }
+  }
+  async function refreshGatewayOverview(force = false) {
+    if (gatewayLoading || runtimeStatus !== "ready") return;
+    if (!force && Date.now() - gatewayFetchedAt < 6000) return;
+    gatewayLoading = true;
+    try {
+      const overview = await invoke<{ agents: ExternalAgentInfo[] | null; sessions: GatewaySessionInfo[] | null }>("gateway_overview");
+      gatewayAgents = overview.agents ?? [];
+      gatewaySessions = overview.sessions ?? [];
+      gatewayFetchedAt = Date.now();
+      if (selectedSessionId && !gatewaySessions.some((item) => item.id === selectedSessionId)) {
+        selectedSessionId = "";
+        sessionTranscript = [];
+        sessionVerification = null;
+      }
+    } catch {
+      // Gateway data is advisory; the workspace stays usable without it.
+    } finally { gatewayLoading = false; }
+  }
+  async function openGatewaySession(sessionId: string) {
+    selectedSessionId = sessionId;
+    panel = "session";
+    sessionTranscript = [];
+    sessionVerification = null;
+    sessionDetailError = "";
+    sessionDetailLoading = true;
+    try {
+      const [transcript, verification] = await Promise.all([
+        invoke<{ messages: GatewayMessageInfo[] }>("gateway_transcript", { sessionId }),
+        invoke<SessionVerification>("gateway_verification", { sessionId }),
+      ]);
+      if (selectedSessionId !== sessionId) return;
+      sessionTranscript = transcript.messages;
+      sessionVerification = verification;
+    } catch (error) {
+      if (selectedSessionId !== sessionId) return;
+      sessionDetailError = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (selectedSessionId === sessionId) sessionDetailLoading = false;
+    }
+  }
+  async function closeGatewaySession(sessionId: string) {
+    try {
+      await invoke("gateway_close_session", { sessionId });
+      showNotice("External session closed. The transcript stays in the record.");
+      await refreshGatewayOverview(true);
+    } catch (error) { showNotice(error instanceof Error ? error.message : String(error)); }
   }
   async function startGuardInvestigation(caseId: string) {
     if (investigatingCaseId) return;
@@ -830,6 +894,8 @@
       cases: runtimeGuardCases.slice(0, 40).map((item) => ({ id: item.id, goal_title: item.goal_title, status: item.status, signal: item.signal })),
       accounts: connectedAccounts.slice(0, 20).map((item) => ({ id: `${item.provider}:${item.email}`, provider: item.provider, email: item.email, status: item.status })),
       messages: [...(mailSelected ? [mailSelected] : []), ...mailMessages].slice(0, 40).map((item) => ({ id: item.id, subject: item.subject, from: item.from ?? "" })),
+      sessions: gatewaySessions.slice(0, 40).map((item) => ({ id: item.id, external_agent_id: item.external_agent_id, status: item.status, label: item.label })),
+      external_agents: gatewayAgents.slice(0, 40).map((item) => ({ id: item.agent_id, agent_id: item.agent_id, identity_status: item.identity_status })),
       selection: { ...(selected ? { kind: selected.kind, id: selected.id } : {}), panel },
       recent_events: state.events.slice(0, 8).map(eventLabel),
       conversation: voiceConversation.slice(-8),
@@ -865,7 +931,23 @@
       guardCase: id ? runtimeGuardCases.find((item) => item.id === id) : undefined,
       account: id ? connectedAccounts.find((item) => item.email === id || `${item.provider}:${item.email}` === id) : undefined,
       message: id ? [...(mailSelected ? [mailSelected] : []), ...mailMessages].find((item) => item.id === id) : undefined,
+      gateway: resolveSessionTarget(id, gatewaySessions, gatewayAgents),
     };
+  }
+
+  async function loadSessionDetail(sessionId: string): Promise<{ transcript: GatewayMessageInfo[]; verification: SessionVerification } | null> {
+    if (selectedSessionId === sessionId && sessionVerification && sessionTranscript.length) {
+      return { transcript: sessionTranscript, verification: sessionVerification };
+    }
+    try {
+      const [transcript, verification] = await Promise.all([
+        invoke<{ messages: GatewayMessageInfo[] }>("gateway_transcript", { sessionId }),
+        invoke<SessionVerification>("gateway_verification", { sessionId }),
+      ]);
+      return { transcript: transcript.messages, verification };
+    } catch {
+      return null;
+    }
   }
 
   function resolveVoiceAccount(intent: VoiceIntent) {
@@ -1014,10 +1096,23 @@
       }
       case "SHOW_EVIDENCE": {
         const item = target.evidence ?? (activeEvidence.length === 1 ? activeEvidence[0] : undefined);
-        if (!item) return activeEvidence.length ? "Which finding should I show?" : "There are no findings yet.";
-        const resource = state.resources.find((entry) => entry.goalId === item.goalId && entry.url === item.sourceUrl);
-        if (resource) { selected = { kind: "resource", id: resource.id }; panel = null; resourceView = true; }
-        return `Showing: ${item.finding}`;
+        if (item) {
+          const resource = state.resources.find((entry) => entry.goalId === item.goalId && entry.url === item.sourceUrl);
+          if (resource) { selected = { kind: "resource", id: resource.id }; panel = null; resourceView = true; }
+          return `Showing: ${item.finding}`;
+        }
+        const session = target.gateway.session ?? activeSession;
+        if (session) {
+          const detail = await loadSessionDetail(session.id);
+          const refs = detail?.verification.verdicts.flatMap((verdict) => verdict.evidence_refs) ?? [];
+          await openGatewaySession(session.id);
+          return refs.length
+            ? `Evidence behind the ${shortAgentName(session.external_agent_id)} session: ${refs.slice(0, 6).join("; ")}. I opened the full record.`
+            : `The ${shortAgentName(session.external_agent_id)} session has no recorded evidence yet. I opened it so you can see.`;
+        }
+        if (activeEvidence.length) return "Which finding should I show?";
+        if (gatewaySessions.length) return "Which session's evidence should I show?";
+        return "There are no findings yet.";
       }
       case "OPEN_INVESTIGATION": {
         const guardCase = target.guardCase ?? (runtimeGuardCases.length === 1 ? runtimeGuardCases[0] : undefined);
@@ -1186,6 +1281,63 @@
         commit({ ...state, theme }); applyTheme();
         return `Appearance set to ${theme === "system" ? "automatic" : theme}.`;
       }
+      case "WHO_IS_TALKING_TO": {
+        await refreshGatewayOverview(true);
+        const named = target.gateway.session;
+        if (named) {
+          const detail = await loadSessionDetail(named.id);
+          await openGatewaySession(named.id);
+          const agent = gatewayAgents.find((item) => item.agent_id === named.external_agent_id);
+          return summarizeSessionForSpeech(named, agent, detail?.verification ?? null);
+        }
+        if (!gatewaySessions.length) return "No external conversations are recorded. Nothing outside KeplerV is being talked to.";
+        const parts = gatewaySessions.slice(0, 5).map((item) => {
+          const agent = gatewayAgents.find((entry) => entry.agent_id === item.external_agent_id);
+          return `${shortAgentName(item.external_agent_id)} (${tierBadge(agent?.identity_status ?? "unknown").label.toLowerCase().replaceAll("_", " ")}, ${item.status})`;
+        });
+        return `External conversations: ${parts.join("; ")}. Say "verify the offer" or "why flagged" about one of them to inspect it.`;
+      }
+      case "VERIFY_OFFER": {
+        await refreshGatewayOverview(true);
+        const session = target.gateway.session ?? (gatewaySessions.length === 1 ? gatewaySessions[0] : undefined);
+        if (!session) return gatewaySessions.length ? "Which session should I verify?" : "No external conversations are recorded, so there is no offer to verify.";
+        const detail = await loadSessionDetail(session.id);
+        if (!detail) return "I could not load that session's records.";
+        await openGatewaySession(session.id);
+        return describeVerificationForSpeech(detail.verification);
+      }
+      case "WHY_FLAGGED": {
+        await refreshGatewayOverview(true);
+        const session = target.gateway.session ?? (gatewaySessions.length === 1 ? gatewaySessions[0] : undefined);
+        if (!session) return gatewaySessions.length ? "Which session should I explain?" : "No external conversations are recorded, so nothing is flagged.";
+        const detail = await loadSessionDetail(session.id);
+        if (!detail) return "I could not load that session's records.";
+        await openGatewaySession(session.id);
+        return whyFlaggedForSpeech(detail.verification, detail.transcript);
+      }
+      case "STOP_TALKING_TO": {
+        await refreshGatewayOverview(true);
+        const session = target.gateway.session ?? (gatewaySessions.filter((item) => item.status === "open").length === 1 ? gatewaySessions.find((item) => item.status === "open") : undefined);
+        if (!session) {
+          const open = gatewaySessions.filter((item) => item.status === "open");
+          return open.length ? "Which open session should I close?" : "No open external sessions exist. Nothing needs closing.";
+        }
+        if (session.status !== "open") return `${shortAgentName(session.external_agent_id)} has no open session. It is already ${session.status}.`;
+        await openGatewaySession(session.id);
+        return `I opened the session with ${shortAgentName(session.external_agent_id)}. To stay safe I never close sessions by voice alone, so confirm Close session in the panel.`;
+      }
+      case "COMPARE_OFFERS": {
+        await refreshGatewayOverview(true);
+        if (!gatewaySessions.length) return "No external conversations are recorded, so there are no offers to compare.";
+        const offers = [];
+        for (const session of gatewaySessions.slice(0, 6)) {
+          const detail = await loadSessionDetail(session.id);
+          if (!detail) continue;
+          const offer = latestPricedOffer(session, detail.transcript);
+          if (offer) offers.push(offer);
+        }
+        return compareOffersForSpeech(offers);
+      }
       default:
         return intent.summary_for_speech;
     }
@@ -1288,6 +1440,7 @@
           {#each goalAgents as agent, index}<path class:edge-active={agent.status === "working"} d={`M500 290 C590 290 660 ${graphAgentY(index, goalAgents.length) * 6} 760 ${graphAgentY(index, goalAgents.length) * 6}`} />{/each}
           {#each state.resources.filter((resource) => resource.goalId === activeGoal?.id) as resource}<path class="edge-resource" d="M500 290 C600 350 680 370 740 395" />{/each}
           {#if activeGoalGuardCase}<path class="edge-incident" d="M500 290 C420 360 355 400 290 420" />{/if}
+          {#each externalGraphNodes as node}<path class="edge-session" d={`M500 290 C560 240 640 ${graphExternalY(node.position, externalGraphNodes.length) * 6} 760 ${graphExternalY(node.position, externalGraphNodes.length) * 6}`} />{/each}
         </svg>
         <button class="presence-orb" class:listening={presence === "listening"} class:working={presence === "coordinating" || presence === "processing"} class:warning={presence === "authorization" || presence === "investigating"} aria-label={`KeplerV presence: ${presence}`} onclick={() => panel = "timeline"}>
           <span class="orb-halo halo-one"></span><span class="orb-halo halo-two"></span><span class="orb-core"></span><span class="orb-specular"></span><span class="orb-state">KEPLERV PRESENCE <b>{presence.replaceAll("_", " ").toUpperCase()}</b></span>
@@ -1296,8 +1449,10 @@
         {#each goalAgents as agent, index}<button class="agent-node" class:agent-selected={selected?.kind === "agent" && selected.id === agent.id} class:agent-paused={agent.status === "paused" || agent.status === "investigating"} style={`--agent-x:76%;--agent-y:${graphAgentY(index, goalAgents.length)}%`} onclick={() => { selected = { kind: "agent", id: agent.id }; panel = "agent"; }}><span class="agent-orbit"><span></span></span><span class="agent-copy"><b>{agent.name}</b><small>{agent.status.toUpperCase()} · {agent.provider}</small></span></button>{/each}
         {#each state.resources.filter((resource) => resource.goalId === activeGoal?.id) as resource}<button class="resource-node" class:resource-selected={selected?.kind === "resource" && selected.id === resource.id} onclick={() => { selected = { kind: "resource", id: resource.id }; panel = "resource_detail"; }}><span>↗</span><b>{resource.label}</b><small>PUBLIC RESOURCE</small></button>{/each}
         {#if activeGoalGuardCase}<button class="incident-node" onclick={() => { selectedGuardCaseId = activeGoalGuardCase!.id; panel = "guard"; currentMenu = "guard"; }}><span>!</span><b>Guard case</b><small>{activeGoalGuardCase.status.replaceAll("_", " ").toUpperCase()}</small></button>{/if}
+        {#if externalGraphNodes.length}<div class="trust-boundary" aria-hidden="true"><span>TRUST BOUNDARY</span></div>{/if}
+        {#each externalGraphNodes as node}<button class="external-agent-node" class:tier-suspect={node.badge.tone === "suspect" || node.badge.tone === "unknown"} style={`--external-x:88%;--external-y:${graphExternalY(node.position, externalGraphNodes.length)}%`} aria-label={`External agent ${node.displayName}, identity ${node.badge.label}`} onclick={() => { if (node.sessionIds[0]) void openGatewaySession(node.sessionIds[0]); }}><span class="tier-dot tier-{node.badge.tone}"></span><span class="agent-copy"><b>{node.displayName}</b><small>{node.badge.label} · {node.openSessions ? `${node.openSessions} OPEN` : "NO OPEN SESSION"}</small></span></button>{/each}
         <div class="board-label">CURRENT GOAL <span>RELATED TASKS &amp; HELPERS</span></div><div class="board-scale">01 — GOAL<br />02 — HELPERS<br />03 — LINKS</div>
-        <div class="graph-legend"><span><i class="legend-goal"></i> GOAL</span><span><i class="legend-agent"></i> AGENT</span><span><i class="legend-resource"></i> RESOURCE</span></div>
+        <div class="graph-legend"><span><i class="legend-goal"></i> GOAL</span><span><i class="legend-agent"></i> AGENT</span><span><i class="legend-resource"></i> RESOURCE</span>{#if externalGraphNodes.length}<span><i class="legend-external"></i> EXTERNAL</span>{/if}</div>
       </div>
 
       <div class="goal-ribbon"><div class="ribbon-title"><span class="ribbon-index">GOAL</span><b>{activeGoal?.title ?? "No goal selected"}</b><small>{activeGoal?.description}</small></div><div class="ribbon-progress"><div><span>DONE</span><b>{activeGoal?.progress ?? 0}%</b></div><span class="progress-track"><i style={`width:${activeGoal?.progress ?? 0}%`}></i></span></div><div class="ribbon-agents"><span>HELPERS</span><b>{goalAgents.length.toString().padStart(2, "0")}</b></div><div class="ribbon-buttons"><button onclick={assignAgent}>＋ Add helper</button><button onclick={() => panel = "resource"}>↗ Add link</button><button onclick={() => openMediaSurface("local-video")}>▶ Media</button><button onclick={() => panel = "timeline"}>Recent activity ↗</button></div></div>
@@ -1369,7 +1524,7 @@
   {/if}
 
   {#if panel}<button class="scrim" aria-label="Dismiss contextual surface" onclick={closePanel}></button><div class="context-panel" role="dialog" aria-modal="true" tabindex="-1">
-    <div class="panel-heading"><div><span class="panel-kicker">WORKSPACE</span><h2>{panel === "settings" ? "Accessibility & settings" : panel === "providers" ? "LLM providers" : panel === "timeline" ? "Recent activity" : panel === "create_goal" ? "New goal" : panel === "resource" ? "Add a link" : panel === "resource_detail" ? "Link details" : panel === "goal" ? "Goal details" : panel === "agent" ? "Helper details" : panel === "guard" ? "Guard cases" : "Approval needed"}</h2></div>{#if panel === "agent"}<button class="panel-back" onclick={closePanel}>← <span>Back to workspace</span></button>{:else}<button class="panel-close" aria-label="Close" onclick={closePanel}>×</button>{/if}</div>
+    <div class="panel-heading"><div><span class="panel-kicker">WORKSPACE</span><h2>{panel === "settings" ? "Accessibility & settings" : panel === "providers" ? "LLM providers" : panel === "timeline" ? "Recent activity" : panel === "create_goal" ? "New goal" : panel === "resource" ? "Add a link" : panel === "resource_detail" ? "Link details" : panel === "goal" ? "Goal details" : panel === "agent" ? "Helper details" : panel === "guard" ? "Guard cases" : panel === "session" ? "External session" : "Approval needed"}</h2></div>{#if panel === "agent"}<button class="panel-back" onclick={closePanel}>← <span>Back to workspace</span></button>{:else}<button class="panel-close" aria-label="Close" onclick={closePanel}>×</button>{/if}</div>
     {#if panel === "settings"}<div class="settings-block"><p>Text size</p><span class="subtle">Choose a size that feels comfortable. It applies across KeplerV.</span><div class="segmented">{#each [{ id: "standard", label: "Standard" }, { id: "large", label: "Large" }, { id: "extra-large", label: "Extra large" }] as size}<button class:segment-active={textSize === size.id} aria-pressed={textSize === size.id} onclick={() => textSize = size.id as TextSize}>{size.label}</button>{/each}</div></div><div class="settings-block"><p>Simple workspace</p><span class="subtle">Show the main actions first. Turn this off to see extra details.</span><button class="accessibility-toggle" role="switch" aria-checked={simpleMode} onclick={() => simpleMode = !simpleMode}><span>{simpleMode ? "On" : "Off"}</span><b>{simpleMode ? "Fewer details" : "Show all details"}</b></button></div><div class="settings-block"><p>Movement</p><span class="subtle">Reduce animations across the workspace.</span><button class="accessibility-toggle" role="switch" aria-checked={reduceMotion} onclick={() => reduceMotion = !reduceMotion}><span>{reduceMotion ? "On" : "Off"}</span><b>Reduce motion</b></button></div><div class="settings-block"><p>Appearance</p><span class="subtle">Choose a light, dark, or automatic theme.</span><div class="segmented">{#each ["system", "light", "dark"] as theme}<button class:segment-active={state.theme === theme} aria-pressed={state.theme === theme} onclick={() => commit({ ...state, theme: theme as AppState["theme"] })}>{theme === "system" ? "Automatic" : theme[0].toUpperCase() + theme.slice(1)}</button>{/each}</div></div><div class="settings-block"><p>Spoken responses</p><span class="subtle">KeplerV speaks confirmations, approvals, and completion summaries using system voices.</span><button class="accessibility-toggle" role="switch" aria-checked={speechEnabled} onclick={() => { speechEnabled = !speechEnabled; voice().setEnabled(speechEnabled); }}><span>{speechEnabled ? "On" : "Off"}</span><b>Speak responses</b></button></div><div class="settings-block"><p>Workspace</p><span class="subtle">Goals and activity are saved on this device.</span><button class="secondary-wide" onclick={clearWorkspace}>Reset workspace</button></div>
     {:else if panel === "providers"}<div class="provider-panel-intro"><p>Connect an AI provider once. KeplerV keeps credentials in your device’s protected credential store.</p><small>Each provider needs its own approved connection method. Local models can connect without an account.</small></div>
       <section class="provider-connect-card"><div class="provider-card-top"><span class="provider-avatar">✦</span><div><b>Meta Muse</b><small>Used by KeplerV research agents</small></div><span class="connection-state">{metaConnected ? activeProvider === "meta" ? "CONNECTED · ACTIVE" : "CONNECTED" : "NOT CONNECTED"}</span></div>{#if metaConnected}<p class="provider-connect-note">Connected securely on this device.{activeProvider === "meta" ? " Research is using Meta Muse." : ""}</p><div class="provider-connect-actions">{#if activeProvider !== "meta"}<button class="provider-default" onclick={() => activateProviderConnection("meta")}>Use for research</button>{/if}<button class="provider-default" onclick={() => removeCredential("meta")}>Disconnect</button></div>{:else}<form class="provider-form" onsubmit={saveMetaCredential}><label>API KEY<input bind:value={metaApiKey} type="password" autocomplete="off" placeholder="Paste your Meta API key" required /></label><button class="object-primary" type="submit" disabled={savingCredential}>{savingCredential ? "Connecting…" : "Connect Meta Muse"}</button></form><small class="provider-security-note">The key is sent to KeplerV’s native runtime and saved in your system keychain. It is not stored with your workspace data.</small>{/if}</section>
@@ -1412,6 +1567,27 @@
     {:else if panel === "timeline"}<div class="timeline-summary"><span>{realActivityEvents.length} RECORDED EVENTS</span><b>Agent activity</b><small>Events are recorded by the local runtime as agents work.</small></div>{#if realActivityEvents.length}<div class="timeline-list">{#each realActivityEvents as event}<article class="timeline-event"><span class="timeline-marker"></span><div><b>{eventLabel(event)}</b><small>{eventTypeLabel(event)} · {agents.find((agent) => agent.id === event.agentId)?.name ?? "KeplerV"}</small><time>{new Date(event.timestamp).toLocaleString()}</time></div></article>{/each}</div>{:else}<p class="subtle">No agent activity yet. Start research from a goal to see its events here.</p>{/if}
     {:else if panel === "resource"}<form class="context-form" onsubmit={submitResource}><p class="subtle">The link opens inside KeplerV and stays connected to this goal. Some websites block embedded viewing; you can open supported links separately.</p><label>LINK NAME<input bind:value={resourceLabel} maxlength="80" /></label><label>CHOOSE A LINK<select bind:value={resourceUrl}>{#each demoResources as resource}<option value={resource.url}>{resource.label}</option>{/each}</select></label><label>OR ENTER A PUBLIC HTTPS ADDRESS<input bind:value={resourceUrl} type="url" placeholder="https://www.nps.gov/…" /></label><button class="object-primary" type="submit">Open inside KeplerV ↗</button></form>
     {:else if panel === "resource_detail" && activeResource}<div class="resource-inspector"><span class="resource-inspector-icon">↗</span><h3>{activeResource.label}</h3><p>This link is associated with <b>{goals.find((goal) => goal.id === activeResource.goalId)?.title}</b>.</p><div class="inspector-block"><span>LINK ADDRESS</span><b>{new URL(activeResource.url).hostname}</b><small>{activeResource.url}</small></div><button class="object-primary" onclick={() => { panel = null; resourceView = true; }}>Open inside KeplerV ↗</button><button class="secondary-wide" onclick={() => invoke("open_public_resource", { url: activeResource.url, label: activeResource.label }).then(() => showNotice("Opened link in a separate window.")).catch((error) => showNotice(String(error)))}>Open separately</button><button class="secondary-wide" onclick={() => panel = null}>Close details</button></div>
+    {:else if panel === "session"}
+      {#if !activeSession}<div class="empty-state"><span>◇</span><h3>No external session selected</h3><p>External conversations appear on the goal graph once a helper talks to another agent.</p></div>
+      {:else}<div class="inspector-status"><span class="tier-dot tier-{tierBadge(activeSessionAgent?.identity_status ?? "unknown").tone}"></span>{shortAgentName(activeSession.external_agent_id).toUpperCase()} <span>·</span> {tierBadge(activeSessionAgent?.identity_status ?? "unknown").label}</div>
+      <div class="inspector-block"><span>EXTERNAL AGENT</span><b>{activeSession.external_agent_id}</b><small>{tierBadge(activeSessionAgent?.identity_status ?? "unknown").explanation}</small></div>
+      <div class="inspector-block"><span>OPERATOR</span><b>{operatorHost(activeSessionAgent?.endpoint ?? activeSession.endpoint)}</b><small>Derived from the session endpoint host. No operator lookups are performed.</small></div>
+      <div class="inspector-block"><span>SESSION</span><b>{activeSession.status.toUpperCase()} · {activeSession.label.toUpperCase()}</b><small>{activeSession.messages_sent} sent · {activeSession.messages_received} received · {activeSession.tokens_used} tokens · Inbound content is untrusted data.</small></div>
+      {#if sessionDetailLoading}<p class="subtle">Loading the recorded transcript…</p>{/if}
+      {#if sessionDetailError}<p class="runtime-error">{sessionDetailError}</p>{/if}
+      {#if sessionVerification}
+        <div class="inspector-block"><span>BEHAVIOR CLASSIFICATION</span><b>{sessionVerification.classification.classification.replaceAll("-", " ").toUpperCase()}</b><small>{sessionVerification.classification.rationale}</small>{#if sessionVerification.abstained}<small>Abstained: evidence is too thin to judge.</small>{/if}</div>
+        {#if sessionVerification.verdicts.length}<div class="task-list"><div class="task-heading"><h3>Verification results</h3><span>{sessionVerification.verdicts.length.toString().padStart(2, "0")}</span></div>{#each sessionVerification.verdicts as verdict}<div class="task-row"><span>{verdict.verdict === "unverified" ? "!" : "✓"}</span><b>{verdict.claim.summary}</b><i>{verdict.verdict.replaceAll("-", " ")}</i></div>{/each}</div>{/if}
+        {#if activeSessionClaims.length}<div class="task-list"><div class="task-heading"><h3>Claims asserted</h3><span>{activeSessionClaims.length.toString().padStart(2, "0")}</span></div>{#each activeSessionClaims as claim}<div class="task-row"><span>“”</span><b>{claim.summary}</b><i>{claim.statement_ref}</i></div>{/each}</div>{/if}
+        <div class="inspector-block technical-detail"><span>CONTRADICTIONS</span>{#if sessionVerification.contradictions.length}{#each sessionVerification.contradictions as item}<b>{item.kind}</b><small>{item.detail}</small>{/each}{:else}<b>None recorded</b>{/if}</div>
+        <div class="inspector-block technical-detail"><span>EVIDENCE REFS</span><b>{sessionVerification.verdicts.flatMap((item) => item.evidence_refs).join(", ") || "None recorded"}</b><small>Every verdict cites the transcript or catalog check behind it.</small></div>
+        <div class="inspector-block technical-detail"><span>CREDENTIAL FIELDS</span><b>{activeSessionSecrets.length ? `${activeSessionSecrets.length} redacted` : "None detected"}</b><small>{activeSessionSecrets.length ? `Field names only — values are never shown: ${activeSessionSecrets.slice(0, 6).join(", ")}` : "No credential-shaped fields arrived in this session."}</small></div>
+        <div class="inspector-block technical-detail"><span>ANALYSIS</span><b>{sessionVerification.analysis_label}</b><small>Deterministic checks over the recorded transcript, not a live-model judgment.</small></div>
+      {/if}
+      <div class="panel-actions">
+        {#if activeSession.status === "open"}<button class="danger-button" onclick={() => closeGatewaySession(activeSession!.id)}>Close session</button>{/if}
+        <button class="secondary-wide" onclick={closePanel}>Back to workspace</button>
+      </div>{/if}
     {:else if panel === "approval" && (pendingEmailSend || state.approval)}{#if pendingEmailSend}<div class="approval-card"><span>HUMAN APPROVAL REQUIRED</span><h3>Email send request</h3><p>KeplerV prepared an email draft. Review it before recording an approval decision. Nothing is sent automatically.</p><div class="approval-detail"><span>TO</span><b>{pendingEmailSend.to}</b></div><div class="approval-detail"><span>SUBJECT</span><b>{pendingEmailSend.subject || "(no subject)"}</b></div><div class="approval-detail"><span>VIA</span><b>{pendingEmailSend.accountEmail ?? "default account"}</b></div><div class="approval-detail"><span>BODY</span><b>{pendingEmailSend.body.slice(0, 280) || "(empty body)"}</b></div><div class="approval-detail"><span>AIP</span><b>REQUIRE APPROVAL</b></div><div class="panel-actions approval-actions"><button class="object-primary" onclick={() => decideEmailSend(true)}>Approve request</button><button class="danger-button" onclick={() => decideEmailSend(false)}>Deny request</button></div><p class="subtle">Approval records a decision in KeplerV; the mail connector is read-only, so no email is transmitted.</p></div>{:else if state.approval}<div class="approval-card"><span>HUMAN APPROVAL REQUIRED</span><h3>Tuition payment request</h3><p>A finance agent requested a tuition transfer. Review this request before recording an approval decision.</p><div class="approval-amount">$750 <small>REQUEST AMOUNT</small></div><div class="approval-detail"><span>AGENT</span><b>{agents.find((agent) => agent.id === state.approval?.agentId)?.name}</b></div><div class="approval-detail"><span>AIP</span><b>REQUIRE APPROVAL</b></div><div class="approval-detail"><span>REQUEST</span><b>{state.approval.action}</b></div><div class="panel-actions approval-actions"><button class="object-primary" onclick={() => decideApproval(true)} disabled={state.approval.status !== "pending"}>Approve request</button><button class="danger-button" onclick={() => decideApproval(false)} disabled={state.approval.status !== "pending"}>Deny request</button><button class="secondary-wide" onclick={() => { const agent = agents.find((item) => item.id === state.approval?.agentId); if (agent) commit(transitionAgent(state, agent.id, "pause")); closePanel(); }}>Pause agent</button></div><p class="subtle">Approval records a decision in KeplerV; no payment is sent.</p></div>{/if}{/if}
   </div>{/if}
 

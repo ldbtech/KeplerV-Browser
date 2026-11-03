@@ -722,12 +722,17 @@ def write_report(report: dict[str, Any], directory: str | Path) -> Path:
     return directory
 
 
+def cli_output_dir(argv: list[str]) -> Path:
+    """Output directory from CLI args: first non-flag positional, else default."""
+    positional = [item for item in argv[1:] if not item.startswith("--")]
+    return Path(positional[0] if positional else "runtime/experiments/results/phase6-eval")
+
+
 def main() -> None:
     import sys
 
     live = "--live" in sys.argv
-    out = Path(sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("--")
-               else "runtime/experiments/results/phase6-eval")
+    out = cli_output_dir(sys.argv)
     report = asyncio.run(run_phase6_eval(out / "work", live=live))
     write_report(report, out)
     print(render_markdown(report))

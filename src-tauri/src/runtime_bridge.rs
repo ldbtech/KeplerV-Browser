@@ -988,6 +988,104 @@ pub fn runtime_create_run(
 }
 
 #[tauri::command]
+pub fn gateway_overview(
+    window: WebviewWindow,
+    state: State<'_, RuntimeBridge>,
+) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    let slot = state
+        .runtime
+        .lock()
+        .map_err(|_| "Runtime state is unavailable.".to_string())?;
+    let runtime = slot
+        .as_ref()
+        .ok_or_else(|| "Runtime is not running.".to_string())?;
+    let client = authorized_client()?;
+    let agents = authenticated_get(&client, &runtime.base_url, &runtime.token, "/gateway/agents")?;
+    let sessions = authenticated_get(&client, &runtime.base_url, &runtime.token, "/gateway/sessions")?;
+    Ok(json!({"agents": agents.get("agents"), "sessions": sessions.get("sessions")}))
+}
+
+#[tauri::command]
+pub fn gateway_transcript(
+    window: WebviewWindow,
+    state: State<'_, RuntimeBridge>,
+    session_id: String,
+) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    if session_id.trim().is_empty() || session_id.len() > 128 {
+        return Err("Gateway session id was empty or too long.".into());
+    }
+    let slot = state
+        .runtime
+        .lock()
+        .map_err(|_| "Runtime state is unavailable.".to_string())?;
+    let runtime = slot
+        .as_ref()
+        .ok_or_else(|| "Runtime is not running.".to_string())?;
+    let client = authorized_client()?;
+    authenticated_get(
+        &client,
+        &runtime.base_url,
+        &runtime.token,
+        &format!("/gateway/sessions/{}/transcript", urlencoding(session_id.trim())),
+    )
+}
+
+#[tauri::command]
+pub fn gateway_verification(
+    window: WebviewWindow,
+    state: State<'_, RuntimeBridge>,
+    session_id: String,
+) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    if session_id.trim().is_empty() || session_id.len() > 128 {
+        return Err("Gateway session id was empty or too long.".into());
+    }
+    let slot = state
+        .runtime
+        .lock()
+        .map_err(|_| "Runtime state is unavailable.".to_string())?;
+    let runtime = slot
+        .as_ref()
+        .ok_or_else(|| "Runtime is not running.".to_string())?;
+    let client = authorized_client()?;
+    authenticated_get(
+        &client,
+        &runtime.base_url,
+        &runtime.token,
+        &format!("/gateway/sessions/{}/verification", urlencoding(session_id.trim())),
+    )
+}
+
+#[tauri::command]
+pub fn gateway_close_session(
+    window: WebviewWindow,
+    state: State<'_, RuntimeBridge>,
+    session_id: String,
+) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    if session_id.trim().is_empty() || session_id.len() > 128 {
+        return Err("Gateway session id was empty or too long.".into());
+    }
+    let slot = state
+        .runtime
+        .lock()
+        .map_err(|_| "Runtime state is unavailable.".to_string())?;
+    let runtime = slot
+        .as_ref()
+        .ok_or_else(|| "Runtime is not running.".to_string())?;
+    let client = authorized_client()?;
+    authenticated_post(
+        &client,
+        &runtime.base_url,
+        &runtime.token,
+        &format!("/gateway/sessions/{}/close", urlencoding(session_id.trim())),
+        json!({}),
+    )
+}
+
+#[tauri::command]
 pub fn runtime_control(
     window: WebviewWindow,
     state: State<'_, RuntimeBridge>,

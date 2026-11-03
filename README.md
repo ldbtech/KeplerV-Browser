@@ -70,6 +70,17 @@ cargo test --manifest-path src-tauri/Cargo.toml
 npm run build
 ```
 
+Phase 6 gates (no live-model evals; `test_demo.py` needs loopback sockets and is
+deselected inside sandboxes — see `docs/phase6-federation.md`):
+
+```sh
+.venv/bin/python -m pytest runtime/tests -q --deselect runtime/tests/test_demo.py
+.venv/bin/python -m pytest runtime/tests/test_phase6_demo_e2e.py -q
+.venv/bin/python -m runtime.experiments.phase6_eval runtime/experiments/results/phase6-eval
+npm test
+npm run build
+```
+
 The deterministic Python workflow exercises orchestration, AIP denial, event persistence, and source-checked evidence. A separate browser integration test below uses real Playwright Chromium. A live Meta API call requires internet access and `MODEL_API_KEY`.
 
 Run `npm run test:browser` to exercise the scheduler and event/evidence store against a real Playwright Chromium session and the public Python documentation site. The Python suite also includes a full live Muse + Chromium workflow. It runs automatically when `MODEL_API_KEY` is present and is skipped otherwise; that test makes real requests to Meta and the public article.
@@ -130,8 +141,17 @@ Then open any goal and use the "Use fictional demo fixtures" button to point res
 | Email read | Fake-mail fixture (3 fictional messages, every payload FAKE-labeled) served over token-authed `/mail/*` routes; Gmail client is real but fails closed as not-connected (keychain tokens not bridged to Python); Outlook is a labeled skeleton; ambiguous references return candidates, never auto-pick |
 | Email send | Fake-mail outbox only, after AIP grant plus explicit approval; voice can only request approval; real-provider send fails loudly with "Nothing was sent" — no live send path by design |
 | Service permissions | 13 service tools gated on exact per-agent/per-goal grants with immediate revoke, approval for sensitive ops, `service.access_denied` events, and high-severity Guard cases; unauthorized sends are denied with an empty outbox (Scenario C) |
+| Trust Gateway | Real exclusive cross-boundary path: SSRF-checked endpoints, strict envelopes, correlation, budgets, rate limits, sqlite transcripts; loopback fixtures only via explicit allowlist |
+| Synthetic merchants | Fake labeled fixtures (cooperative/competitive/misleading/adversarial) over the fictional KeplerV Bazaar; fictional credits, no real purchases |
+| Negotiation + verification | Real multi-round gateway flows with frozen goals, threat redaction, credential refusal, and 4-level claim verdicts against a SHA-256-manifested trusted catalog; local policy is a deterministic fake |
+| Federated AIP | Experimental symmetric-HMAC signed-statement prototype (established primitives, no custom crypto); production needs asymmetric keys in a KMS |
+| Guard exchange investigation | Deterministic `fake-rules-v1` classification (8 classes) + pure investigation with catalog/ledger contradiction detection and gateway-bound follow-ups; contradictions open Guard cases |
+| Phase 6 eval | Real three-arm harness (AIP-only vs passive vs active) over dev + held-out fictional scenarios; fake adapters by default, live loopback explicitly opt-in and still fictional |
+| Gateway inspection | Real voice intents + tier-badged session graph rendering fixture records; close stays human-confirmed, never voice-triggered |
 
 See `docs/phase5-capabilities.md` for the full honest real-vs-fake matrix, verification scenarios, and module map.
+
+See `docs/phase6-federation.md` for the Phase 6 real/experimental/unsupported matrix and dev commands (`docs/phase6-trust-gateway.md` and `docs/phase6-eval.md` cover the protocol and eval details).
 
 The native resource-window feature remains separate from the agent research browser. A research agent uses its isolated Playwright context and does not open conventional tabs in the user's visible window. Web search uses DuckDuckGo's public HTML search endpoint; no separate search account or API key is required.
 
@@ -141,6 +161,7 @@ The native resource-window feature remains separate from the agent research brow
 - `src/simulation/` — existing goal graph behavior and explicitly local demonstration scenarios.
 - `src/experience/` — media surface manager (audio focus, capability probes) and account resolution.
 - `runtime/` — FastAPI sidecar, Meta adapter, agent scheduler, AIP, Playwright browser gateway, SQLite store, and tests.
+- `runtime/gateway/`, `runtime/merchants/`, `runtime/negotiation/`, `runtime/verification/`, `runtime/federation/` — Trust Gateway, synthetic merchants, negotiation driver, claim verification, and federated-statement prototype.
 - `runtime/services/` — service registry, account metadata store, and labeled fake fixtures.
 - `runtime/connectors/` — Gmail client, Outlook skeleton, fake-mail adapter, shared account resolver.
 - `src-tauri/src/oauth.rs` — OAuth PKCE flow, keychain token storage, connect/refresh/disconnect commands.
