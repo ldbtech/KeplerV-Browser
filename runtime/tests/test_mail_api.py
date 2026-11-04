@@ -114,13 +114,14 @@ def test_mail_revoked_and_expired_accounts_are_forbidden(tmp_path):
     assert "expired" in expired.json()["detail"]
 
 
-def test_mail_outlook_skeleton_is_labeled_not_live(tmp_path):
+def test_mail_outlook_without_session_is_disconnected_not_fabricated(tmp_path):
     service = _service(tmp_path)
     service._services().connect("outlook", "ada@example.test")
     with TestClient(create_app(service)) as client:
         response = client.get("/mail/messages", params={"email": "ada@example.test"}, headers=_headers())
-    assert response.status_code == 400
-    assert "OUTLOOK SKELETON" in response.json()["detail"]
+    assert response.status_code == 404
+    assert "connect the account first" in response.json()["detail"].lower()
+    assert "messages" not in response.json(), "no message data may be fabricated"
 
 
 def test_mail_gmail_without_session_is_disconnected_not_fabricated(tmp_path):
@@ -129,5 +130,5 @@ def test_mail_gmail_without_session_is_disconnected_not_fabricated(tmp_path):
     with TestClient(create_app(service)) as client:
         response = client.get("/mail/messages", params={"email": "ada@example.test"}, headers=_headers())
     assert response.status_code == 404
-    assert "connect first" in response.json()["detail"].lower()
-    assert "messages" not in response.json()["detail"]
+    assert "connect the account first" in response.json()["detail"].lower()
+    assert "messages" not in response.json(), "no message data may be fabricated"

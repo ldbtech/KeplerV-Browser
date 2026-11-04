@@ -10,6 +10,11 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 
+#: Label carried by every live-send result so transmitted mail is never
+#: confused with the clearly-labeled fake fixture outbox.
+LIVE_SEND_LABEL = "LIVE — transmitted via the provider mail API"
+
+
 class MailNotConnectedError(RuntimeError):
     """Raised when mail is requested without a connected account.
 

@@ -91,23 +91,28 @@ pub fn provider_config(provider: &str) -> Option<OAuthProviderConfig> {
     match provider {
         "gmail" => Some(OAuthProviderConfig {
             provider: "gmail".into(),
-            label: "Gmail (read-only)".into(),
+            label: "Gmail".into(),
             authorize_url: "https://accounts.google.com/o/oauth2/v2/auth".into(),
             token_url: "https://oauth2.googleapis.com/token".into(),
             revoke_url: Some("https://oauth2.googleapis.com/revoke".into()),
             userinfo_url: Some("https://openidconnect.googleapis.com/v1/userinfo".into()),
-            scopes: vec!["openid".into(), "email".into(), "https://www.googleapis.com/auth/gmail.readonly".into()],
-            capabilities: vec!["mail.read".into(), "mail.search".into(), "mail.get".into()],
+            scopes: vec![
+                "openid".into(),
+                "email".into(),
+                "https://www.googleapis.com/auth/gmail.readonly".into(),
+                "https://www.googleapis.com/auth/gmail.send".into(),
+            ],
+            capabilities: vec!["mail.read".into(), "mail.search".into(), "mail.get".into(), "mail.send".into()],
         }),
         "outlook" => Some(OAuthProviderConfig {
             provider: "outlook".into(),
-            label: "Outlook (read-only)".into(),
+            label: "Outlook".into(),
             authorize_url: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize".into(),
             token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token".into(),
             revoke_url: None,
             userinfo_url: Some("https://graph.microsoft.com/oidc/userinfo".into()),
-            scopes: vec!["openid".into(), "email".into(), "Mail.Read".into()],
-            capabilities: vec!["mail.read".into(), "mail.search".into(), "mail.get".into()],
+            scopes: vec!["openid".into(), "email".into(), "Mail.Read".into(), "Mail.Send".into()],
+            capabilities: vec!["mail.read".into(), "mail.search".into(), "mail.get".into(), "mail.send".into()],
         }),
         "fake-mail" => Some(OAuthProviderConfig {
             provider: "fake-mail".into(),
@@ -415,6 +420,132 @@ pub fn metadata_for(token_set: &OAuthTokenSet, status: &str) -> ConnectedAccount
     }
 }
 
+/// Providers that accept a user-pasted public OAuth client ID. `fake-mail`
+/// is a local fixture and needs none.
+pub fn accepts_client_id(provider: &str) -> bool {
+    matches!(provider, "gmail" | "outlook")
+}
+
+/// Validate a user-pasted public client ID (never a secret). Pure so the
+/// settings path is unit-testable without the app data dir.
+pub fn validate_client_id(provider: &str, client_id: &str) -> Result<String, String> {
+    if !accepts_client_id(provider) {
+        return Err("That provider does not use an OAuth client ID.".into());
+    }
+    let trimmed = client_id.trim();
+    if trimmed.is_empty() {
+        return Err("Enter the OAuth client ID from your provider app registration.".into());
+    }
+    if trimmed.len() > 512 {
+        return Err("That client ID is too long.".into());
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        return Err("Client IDs use letters, digits, dots, dashes, and underscores only.".into());
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Merge one client ID into the stored `oauth-client-ids.json` map. Pure so
+/// the file update is unit-testable; the caller writes the returned JSON.
+pub fn merge_client_id_map(
+    existing_raw: Option<&str>,
+    provider: &str,
+    client_id: &str,
+) -> Result<String, String> {
+    let mut map: HashMap<String, String> = match existing_raw {
+        None => HashMap::new(),
+        Some(raw) if raw.trim().is_empty() => HashMap::new(),
+        Some(raw) => serde_json::from_str(raw).map_err(|_| {
+            "The stored client-ID file could not be read. Fix or delete oauth-client-ids.json and try again."
+                .to_string()
+        })?,
+    };
+    map.insert(provider.to_string(), client_id.to_string());
+    serde_json::to_string_pretty(&map)
+        .map_err(|_| "Could not save the client ID.".to_string())
+}
+
+/// Tolerant parse for reads: a missing or corrupt file surfaces as empty so
+/// the settings UI can overwrite it with a fresh save.
+pub fn parse_client_id_map(raw: &str) -> HashMap<String, String> {
+    serde_json::from_str(raw).unwrap_or_default()
+}
+
+/// Extract the access token from a stored token-set JSON blob when it is
+/// non-empty and unexpired. Pure so expiry handling is unit-testable without
+/// touching the keychain. Callers must never log the result.
+pub fn extract_valid_access_token(token_set_json: &str, now: u64) -> Option<String> {
+    let set: OAuthTokenSet = serde_json::from_str(token_set_json).ok()?;
+    if set.access_token.is_empty() || set.expires_at <= now {
+        return None;
+    }
+    Some(set.access_token)
+}
+
+/// Effective account status: stored "revoked" always wins, else expiry
+/// applies. Mirrors the Python registry and `read_oauth_accounts`.
+pub fn effective_status(status: &str, expires_at: u64, now: u64) -> &'static str {
+    if status == "revoked" {
+        "revoked"
+    } else if expires_at <= now {
+        "expired"
+    } else {
+        "connected"
+    }
+}
+
+/// Resolve one connected account for token injection. Mirrors the Python
+/// `resolve_account` rules (exact email wins, else provider/email-substring
+/// filter, single candidate wins) but only ever resolves accounts whose
+/// effective status is connected — anything else yields no token, so the
+/// sidecar fails closed.
+pub fn resolve_oauth_account<'a>(
+    accounts: &'a [ConnectedAccountMeta],
+    provider: Option<&str>,
+    email: Option<&str>,
+    now: u64,
+) -> Option<&'a ConnectedAccountMeta> {
+    let provider = provider
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty());
+    let email = email
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty());
+    if let Some(needle) = email.as_deref() {
+        for account in accounts {
+            let provider_matches = provider
+                .as_deref()
+                .map_or(true, |p| account.provider.to_lowercase() == p);
+            if account.email.to_lowercase() == needle
+                && provider_matches
+                && effective_status(&account.status, account.expires_at, now) == "connected"
+            {
+                return Some(account);
+            }
+        }
+    }
+    let candidates: Vec<&ConnectedAccountMeta> = accounts
+        .iter()
+        .filter(|account| {
+            effective_status(&account.status, account.expires_at, now) == "connected"
+                && provider
+                    .as_deref()
+                    .map_or(true, |p| account.provider.to_lowercase() == p)
+                && email.as_deref().map_or(true, |e| {
+                    account.email.to_lowercase().contains(e)
+                })
+        })
+        .collect();
+    if candidates.len() == 1 {
+        candidates.into_iter().next()
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,5 +613,108 @@ mod tests {
         assert!(sanitize_account_id("no-at-sign").is_err());
         assert!(sanitize_account_id("a/b@c.com").is_err());
         assert_eq!(sanitize_account_id("Ada@Example.Test").unwrap(), "ada@example.test");
+    }
+
+    #[test]
+    fn live_providers_request_read_and_send_scopes() {
+        let gmail = provider_config("gmail").unwrap();
+        assert!(gmail.scopes.iter().any(|s| s.contains("gmail.readonly")));
+        assert!(gmail.scopes.iter().any(|s| s.contains("gmail.send")));
+        assert!(gmail.capabilities.contains(&"mail.send".to_string()));
+        let outlook = provider_config("outlook").unwrap();
+        assert!(outlook.scopes.iter().any(|s| s == "Mail.Read"));
+        assert!(outlook.scopes.iter().any(|s| s == "Mail.Send"));
+        assert!(outlook.capabilities.contains(&"mail.send".to_string()));
+        let fake = provider_config("fake-mail").unwrap();
+        assert!(!fake.capabilities.contains(&"mail.send".to_string()));
+    }
+
+    #[test]
+    fn client_id_validation_accepts_real_shapes() {
+        // Google Desktop-app IDs and Microsoft application (client) IDs.
+        assert!(validate_client_id("gmail", "1234567890-abcdef.apps.googleusercontent.com").is_ok());
+        assert!(validate_client_id("outlook", "00000000-0000-0000-0000-000000000000").is_ok());
+        assert_eq!(validate_client_id("gmail", "  abc.123_X-Y ").unwrap(), "abc.123_X-Y");
+        assert!(validate_client_id("fake-mail", "anything").is_err());
+        assert!(validate_client_id("gmail", "  ").is_err());
+        assert!(validate_client_id("gmail", "has space").is_err());
+        assert!(validate_client_id("gmail", "has/slash").is_err());
+        assert!(validate_client_id("gmail", &"x".repeat(513)).is_err());
+    }
+
+    #[test]
+    fn client_id_merge_preserves_other_providers() {
+        let first = merge_client_id_map(None, "gmail", "gmail-id").unwrap();
+        assert!(first.contains("gmail-id"));
+        let second = merge_client_id_map(Some(&first), "outlook", "outlook-id").unwrap();
+        let map: HashMap<String, String> = serde_json::from_str(&second).unwrap();
+        assert_eq!(map.get("gmail").map(String::as_str), Some("gmail-id"));
+        assert_eq!(map.get("outlook").map(String::as_str), Some("outlook-id"));
+        assert!(merge_client_id_map(Some("not json"), "gmail", "x").is_err());
+        assert!(parse_client_id_map("not json").is_empty());
+        assert!(parse_client_id_map("").is_empty());
+    }
+
+    #[test]
+    fn access_token_extraction_honors_expiry() {
+        let live = serde_json::json!({
+            "provider": "gmail", "account_email": "ada@example.test",
+            "access_token": "live-token", "refresh_token": "r",
+            "scopes": [], "expires_at": 2_000_000_000_u64,
+        })
+        .to_string();
+        assert_eq!(extract_valid_access_token(&live, 1_000_000_000), Some("live-token".to_string()));
+        assert_eq!(extract_valid_access_token(&live, 2_000_000_000), None);
+        assert_eq!(extract_valid_access_token("not json", 1_000_000_000), None);
+        let empty = live.replace("live-token", "");
+        assert_eq!(extract_valid_access_token(&empty, 1_000_000_000), None);
+    }
+
+    fn connected_meta(provider: &str, email: &str) -> ConnectedAccountMeta {
+        ConnectedAccountMeta {
+            provider: provider.into(),
+            email: email.into(),
+            scopes: vec![],
+            expires_at: 2_000_000_000,
+            status: "connected".into(),
+        }
+    }
+
+    #[test]
+    fn bridge_resolution_mirrors_python_rules() {
+        let now = 1_000_000_000;
+        let accounts = vec![
+            connected_meta("gmail", "ada@example.test"),
+            connected_meta("gmail", "grace@example.test"),
+            connected_meta("outlook", "ada@example.test"),
+        ];
+        // Exact email wins even with several accounts present.
+        let hit = resolve_oauth_account(&accounts, None, Some("Grace@Example.Test"), now).unwrap();
+        assert_eq!(hit.email, "grace@example.test");
+        // Provider filter narrows to one.
+        let hit = resolve_oauth_account(&accounts, Some("outlook"), None, now).unwrap();
+        assert_eq!(hit.provider, "outlook");
+        // Ambiguous and empty references resolve to nothing (fail closed).
+        assert!(resolve_oauth_account(&accounts, None, None, now).is_none());
+        assert!(resolve_oauth_account(&accounts, Some("gmail"), None, now).is_none());
+        assert!(resolve_oauth_account(&accounts, None, Some("nobody@example.test"), now).is_none());
+        // Email substring narrows like the Python resolver.
+        let hit = resolve_oauth_account(&accounts, Some("gmail"), Some("grace"), now).unwrap();
+        assert_eq!(hit.email, "grace@example.test");
+    }
+
+    #[test]
+    fn bridge_resolution_skips_expired_and_revoked() {
+        let now = 1_000_000_000;
+        let mut expired = connected_meta("gmail", "old@example.test");
+        expired.expires_at = now - 1;
+        let mut revoked = connected_meta("gmail", "gone@example.test");
+        revoked.status = "revoked".into();
+        let accounts = vec![expired, revoked];
+        assert!(resolve_oauth_account(&accounts, None, Some("old@example.test"), now).is_none());
+        assert!(resolve_oauth_account(&accounts, None, Some("gone@example.test"), now).is_none());
+        assert_eq!(effective_status("revoked", now + 100, now), "revoked");
+        assert_eq!(effective_status("connected", now - 1, now), "expired");
+        assert_eq!(effective_status("connected", now + 1, now), "connected");
     }
 }

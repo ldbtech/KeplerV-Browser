@@ -1,29 +1,43 @@
-"""Read-only Gmail connector using the official Gmail API shapes.
+"""Gmail connector using the official Gmail API shapes.
 
-Endpoints (all HTTPS, all GET):
+Read endpoints (all HTTPS, all GET):
 - ``GET /gmail/v1/users/{userId}/messages`` (list; ``q`` for search)
 - ``GET /gmail/v1/users/{userId}/messages/{id}?format=full`` (read)
 - ``GET /gmail/v1/users/{userId}/threads/{id}?format=full`` (thread)
 
-Minimal scope: ``https://www.googleapis.com/auth/gmail.readonly``.
-There is intentionally no send path: sending stays approval-gated elsewhere
-and this connector cannot transmit mail at all.
+Send endpoint (live transmission, approval-gated by the caller):
+- ``POST /gmail/v1/users/{userId}/messages/send`` (base64url RFC 2822)
 
-The connector never fabricates messages. Without a token supplier (live
-tokens stay in the Rust keychain and are injected per call) every method
-raises :class:`MailNotConnectedError`.
+Read scope: ``https://www.googleapis.com/auth/gmail.readonly``.
+Send scope: ``https://www.googleapis.com/auth/gmail.send``.
+
+:class:`GmailConnector` stays read-only by design: transmission lives only
+in :class:`GmailSender`, which the scheduler calls after an AIP grant plus
+explicit human approval. Neither class fabricates messages. Live tokens stay
+in the Rust keychain and are injected per request over the trusted authed
+``127.0.0.1`` sidecar channel; without a token supplier every method raises
+:class:`MailNotConnectedError` instead of returning anything.
 """
 
 from __future__ import annotations
 
 import base64
+from email.message import EmailMessage
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
-from runtime.connectors.base import MailNotConnectedError, ResolvedAccount, normalize_message
+from runtime.connectors.base import (
+    LIVE_SEND_LABEL,
+    MailNotConnectedError,
+    ResolvedAccount,
+    normalize_message,
+)
 
 GMAIL_API_BASE = "https://gmail.googleapis.com"
 GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 MINIMAL_SCOPES = ["openid", "email", GMAIL_READONLY_SCOPE]
+SEND_SCOPES = ["openid", "email", GMAIL_READONLY_SCOPE, GMAIL_SEND_SCOPE]
 
 
 def _decode_body(data: str) -> str:
@@ -81,6 +95,21 @@ def parse_gmail_message(raw: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _check_api_base(api_base: str) -> str:
+    """Allow the official HTTPS endpoint plus loopback overrides for tests.
+
+    The mock-OAuth-IdP end-to-end test points connectors at a loopback mock;
+    anything else that is not HTTPS is rejected.
+    """
+    parts = urlsplit(api_base)
+    host = (parts.hostname or "").lower()
+    if parts.scheme == "https" and host and not parts.username and not parts.password:
+        return api_base.rstrip("/")
+    if parts.scheme == "http" and host in {"127.0.0.1", "localhost"} and not parts.username and not parts.password:
+        return api_base.rstrip("/")
+    raise ValueError("The Gmail API base must be the official HTTPS endpoint or a loopback test URL.")
+
+
 class GmailConnector:
     """Read-only Gmail access. No send/delete methods exist on this class."""
 
@@ -90,9 +119,11 @@ class GmailConnector:
         self,
         client: Any | None = None,
         token_supplier: Callable[[ResolvedAccount], str | None] | None = None,
+        api_base: str = GMAIL_API_BASE,
     ) -> None:
         self._client = client
         self._token_supplier = token_supplier
+        self._api_base = _check_api_base(api_base)
 
     def _token(self, account: ResolvedAccount) -> str:
         token = self._token_supplier(account) if self._token_supplier else None
@@ -112,7 +143,7 @@ class GmailConnector:
         client = self._require_client()
         token = self._token(account)
         response = await client.get(
-            f"{GMAIL_API_BASE}{path}",
+            f"{self._api_base}{path}",
             params=params,
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -161,4 +192,83 @@ class GmailConnector:
             "fake": False,
             "thread_id": payload.get("id", thread_id.strip()),
             "messages": [parse_gmail_message(part) for part in parts],
+        }
+
+
+def build_gmail_send_payload(sender: str, to: str, subject: str, body: str) -> dict[str, str]:
+    """Build the ``messages.send`` request body (base64url RFC 2822).
+
+    Pure helper so the wire format is unit-testable without HTTP.
+    """
+    sender = sender.strip()
+    to = to.strip()
+    subject = subject.strip()
+    if "@" not in sender or "@" not in to:
+        raise ValueError("Enter valid sender and recipient addresses.")
+    if not subject or not body.strip():
+        raise ValueError("Subject and body are required.")
+    message = EmailMessage()
+    message["From"] = sender
+    message["To"] = to
+    message["Subject"] = subject[:300]
+    message.set_content(body[:2000])
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
+    return {"raw": raw}
+
+
+class GmailSender:
+    """Live Gmail transmission over ``POST .../messages/send``.
+
+    Deliberately separate from the read-only :class:`GmailConnector` so the
+    read path can never transmit. Callers (the scheduler's
+    ``execute_service_send``) must enforce the AIP grant plus explicit human
+    approval before calling :meth:`send_message`.
+    """
+
+    provider_id = "gmail"
+
+    def __init__(
+        self,
+        client: Any | None = None,
+        token_supplier: Callable[[ResolvedAccount], str | None] | None = None,
+        api_base: str = GMAIL_API_BASE,
+    ) -> None:
+        self._client = client
+        self._token_supplier = token_supplier
+        self._api_base = _check_api_base(api_base)
+
+    def _token(self, account: ResolvedAccount) -> str:
+        token = self._token_supplier(account) if self._token_supplier else None
+        if not token:
+            raise MailNotConnectedError(
+                f"No live Gmail session for {account.email}. Connect the account first. "
+                "Nothing was sent."
+            )
+        return token
+
+    async def send_message(self, account: ResolvedAccount, to: str, subject: str, body: str) -> dict[str, Any]:
+        """Transmit one message. Returns a clearly-labeled live receipt."""
+        if self._client is None:
+            raise MailNotConnectedError("Gmail has no HTTP client in this context; connect first.")
+        payload = build_gmail_send_payload(account.email, to, subject, body)
+        token = self._token(account)
+        response = await self._client.post(
+            f"{self._api_base}/gmail/v1/users/me/messages/send",
+            json=payload,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        if response.status_code == 401:
+            raise MailNotConnectedError("Gmail rejected the session. Reconnect the account.")
+        if response.status_code >= 400:
+            raise RuntimeError(f"Gmail send failed with HTTP {response.status_code}.")
+        data = response.json()
+        message_id = data.get("id", "") if isinstance(data, dict) else ""
+        return {
+            "provider": "gmail",
+            "account": account.email,
+            "to": to.strip(),
+            "message_id": str(message_id),
+            "fake": False,
+            "live": True,
+            "label": LIVE_SEND_LABEL,
         }

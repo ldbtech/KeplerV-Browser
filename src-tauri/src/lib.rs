@@ -1,5 +1,6 @@
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use url::Url;
 
 mod runtime_bridge;
@@ -23,6 +24,59 @@ fn is_allowed_resource(url: &Url) -> bool {
         && url
             .host_str()
             .is_some_and(|host| ALLOWED_HOSTS.contains(&host))
+}
+
+/// Hosts allowed for the labeled system-browser fallback. These are
+/// DRM-protected providers (e.g. Netflix) that cannot play inside a Tauri
+/// webview, so they are never opened in an embedded window.
+const SYSTEM_BROWSER_ALLOWED_HOSTS: &[&str] = &["netflix.com", "www.netflix.com"];
+
+fn is_main_window_label(label: &str) -> bool {
+    label == "main"
+}
+
+/// Strict validation for the system-browser fallback: http(s), standard port,
+/// no embedded credentials, and an explicit host allowlist. The returned URL
+/// is re-serialized from the parsed form so the opener receives exactly one
+/// normalized address.
+fn parse_system_browser_url(raw: &str) -> Result<Url, String> {
+    let parsed = Url::parse(raw.trim()).map_err(|_| "Enter a valid http(s) URL.".to_string())?;
+    let standard_port = match parsed.scheme() {
+        "https" => Some(443),
+        "http" => Some(80),
+        _ => None,
+    };
+    if standard_port.is_none() || parsed.port_or_known_default() != standard_port {
+        return Err(
+            "Only http(s) URLs on the standard port can be opened in the system browser."
+                .to_string(),
+        );
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("URLs with embedded credentials cannot be opened.".to_string());
+    }
+    if !parsed
+        .host_str()
+        .is_some_and(|host| SYSTEM_BROWSER_ALLOWED_HOSTS.contains(&host))
+    {
+        return Err("This address is not in the system-browser allowlist.".to_string());
+    }
+    Ok(parsed)
+}
+
+#[tauri::command]
+fn open_system_browser(window: WebviewWindow, url: String) -> Result<(), String> {
+    if !is_main_window_label(window.label()) {
+        return Err("The system-browser fallback is available only to KeplerV's main window."
+            .to_string());
+    }
+    let parsed = parse_system_browser_url(&url)?;
+    // No shell: the validated URL is passed as a single argv element to macOS `open`.
+    Command::new("open")
+        .arg(parsed.as_str())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Could not open the system browser: {error}"))
 }
 
 #[tauri::command]
@@ -57,6 +111,7 @@ pub fn run() {
         .manage(runtime_bridge::RuntimeBridge::default())
         .invoke_handler(tauri::generate_handler![
             open_public_resource,
+            open_system_browser,
             runtime_bridge::runtime_start,
             runtime_bridge::runtime_snapshot,
             runtime_bridge::runtime_mail_list,
@@ -86,6 +141,8 @@ pub fn run() {
             runtime_bridge::oauth_connect,
             runtime_bridge::oauth_refresh,
             runtime_bridge::oauth_disconnect,
+            runtime_bridge::oauth_client_ids,
+            runtime_bridge::oauth_client_id_save,
             runtime_bridge::account_status
         ])
         .build(tauri::generate_context!())
@@ -116,6 +173,58 @@ mod tests {
         assert!(!is_allowed_resource(&unusual_port));
         let credentials = Url::parse("https://user:secret@www.nps.gov/").unwrap();
         assert!(!is_allowed_resource(&credentials));
+    }
+
+    #[test]
+    fn system_browser_policy_allows_only_allowlisted_http_hosts() {
+        for raw in [
+            "https://www.netflix.com/title/12345",
+            "https://netflix.com/",
+            "http://www.netflix.com/browse",
+        ] {
+            assert!(parse_system_browser_url(raw).is_ok(), "unexpected reject: {raw}");
+        }
+        // Host and scheme are normalized before the allowlist check.
+        assert!(parse_system_browser_url("HTTPS://WWW.NETFLIX.COM/").is_ok());
+        assert!(parse_system_browser_url("  https://www.netflix.com/  ").is_ok());
+    }
+
+    #[test]
+    fn system_browser_policy_rejects_non_allowlisted_or_unsafe_urls() {
+        for raw in [
+            "https://example.com/",
+            "https://netflix.com.evil.example/",
+            "https://evil-netflix.com/",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "data:text/plain,hi",
+            "https://www.netflix.com:8443/",
+            "http://www.netflix.com:8080/",
+            "https://user:secret@www.netflix.com/",
+            "https://user@www.netflix.com/",
+            "not a url",
+            "",
+        ] {
+            assert!(parse_system_browser_url(raw).is_err(), "unexpected accept: {raw}");
+        }
+    }
+
+    #[test]
+    fn system_browser_shell_shaped_input_stays_a_single_url_argument() {
+        // Command::new("open").arg(...) never spawns a shell, and validation
+        // re-serializes from the parsed URL, so metacharacters cannot split argv.
+        let parsed = parse_system_browser_url("https://www.netflix.com/title/123?x=`id`;echo")
+            .expect("query metacharacters are legal URL content");
+        assert_eq!(parsed.as_str(), "https://www.netflix.com/title/123?x=`id`;echo");
+        assert!(parse_system_browser_url("https://www.netflix.com/\"; touch /tmp/pwned; echo \"").is_err());
+    }
+
+    #[test]
+    fn system_browser_fallback_is_main_window_only() {
+        assert!(is_main_window_label("main"));
+        assert!(!is_main_window_label("resource-1"));
+        assert!(!is_main_window_label("oauth-auth"));
+        assert!(!is_main_window_label(""));
     }
 
     #[test]

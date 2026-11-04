@@ -70,6 +70,36 @@ class MailReadQuery(MailAccountRef):
     pass
 
 
+class AccountSyncMeta(StrictModel):
+    """One non-secret account row pushed by Rust. Tokens are never accepted
+    here (``extra="forbid"``): pushing a token to the metadata sync fails."""
+
+    provider: str = Field(max_length=64)
+    email: str = Field(max_length=256)
+    scopes: list[str] = Field(default_factory=list, max_length=32)
+    expires_at: int = Field(ge=0)
+    status: str = Field(default="connected", max_length=32)
+
+
+class AccountSyncRef(StrictModel):
+    provider: str = Field(max_length=64)
+    email: str = Field(max_length=256)
+
+
+class AccountSyncRequest(StrictModel):
+    accounts: list[AccountSyncMeta] = Field(default_factory=list, max_length=64)
+    removed: list[AccountSyncRef] = Field(default_factory=list, max_length=64)
+
+
+class MailTokenPush(StrictModel):
+    """One Rust-pushed bridge token. Held in memory only, never persisted."""
+
+    provider: str = Field(max_length=64)
+    email: str = Field(max_length=256)
+    access_token: str = Field(min_length=1, max_length=8192)
+    expires_at: int = Field(ge=0)
+
+
 class RuntimeEvent(BaseModel):
     id: str
     sequence: int

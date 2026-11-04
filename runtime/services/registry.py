@@ -2,8 +2,11 @@
 
 This module holds provider descriptors (labels, capabilities, scopes) and
 per-account *metadata* (status, scopes, expiry). OAuth tokens themselves stay
-in the Rust keychain under ``oauth:{provider}:{account}`` entries; Python only
-holds the account identity as an opaque handle and never sees token values.
+in the Rust keychain under ``oauth:{provider}:{account}`` entries; Python
+only ever sees request-scoped tokens (one sidecar-only header, one request)
+or short-lived entries in the in-memory :mod:`runtime.services.mail_token_vault`
+bridge — this store holds the account identity as an opaque handle plus
+metadata, and never token values.
 """
 
 from __future__ import annotations
@@ -19,21 +22,28 @@ STATUS_CONNECTED = "connected"
 STATUS_EXPIRED = "expired"
 STATUS_REVOKED = "revoked"
 
-#: Non-secret provider descriptors. Mirrors ``src-tauri/src/oauth.rs``.
+#: Non-secret provider descriptors. Mirrors ``src-tauri/src/oauth.rs``
+#: (scope strings are literals here to avoid a connectors<->services
+#: import cycle; ``test_provider_descriptors_match_connectors`` guards drift).
 PROVIDER_DESCRIPTORS: dict[str, dict] = {
     "gmail": {
         "id": "gmail",
-        "label": "Gmail (read-only)",
+        "label": "Gmail",
         "auth": "oauth2-pkce",
-        "scopes": ["openid", "email", "https://www.googleapis.com/auth/gmail.readonly"],
-        "capabilities": ["mail.read", "mail.search", "mail.get"],
+        "scopes": [
+            "openid",
+            "email",
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.send",
+        ],
+        "capabilities": ["mail.read", "mail.search", "mail.get", "mail.send"],
     },
     "outlook": {
         "id": "outlook",
-        "label": "Outlook (read-only)",
+        "label": "Outlook",
         "auth": "oauth2-pkce",
-        "scopes": ["openid", "email", "Mail.Read"],
-        "capabilities": ["mail.read", "mail.search", "mail.get"],
+        "scopes": ["openid", "email", "Mail.Read", "Mail.Send"],
+        "capabilities": ["mail.read", "mail.search", "mail.get", "mail.send"],
     },
     "fake-mail": {
         "id": "fake-mail",
@@ -142,6 +152,56 @@ class ServiceRegistry:
         if removed:
             self._save()
         return removed
+
+    def sync_accounts(
+        self,
+        accounts: list[dict],
+        removed: list[dict] | None = None,
+    ) -> dict[str, int]:
+        """Apply a Rust-pushed metadata snapshot (``POST /accounts/sync``).
+
+        Upserts non-secret account metadata and drops explicitly removed
+        accounts. Only known providers and well-formed rows are accepted;
+        anything else raises :class:`ValueError` and changes nothing.
+        """
+        staged: list[ConnectedAccount] = []
+        for row in accounts:
+            if not isinstance(row, dict):
+                raise ValueError("Synced accounts must be objects.")
+            provider = str(row.get("provider", "")).strip().lower()
+            self.describe(provider)  # raises for unknown providers
+            email = str(row.get("email", "")).strip().lower()
+            if "@" not in email:
+                raise ValueError("Enter a valid account email.")
+            scopes = row.get("scopes", [])
+            if not isinstance(scopes, list) or not all(isinstance(scope, str) for scope in scopes):
+                raise ValueError("Synced scopes must be a string list.")
+            try:
+                expires_at = int(row.get("expires_at", 0))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Synced accounts need an expiry time.") from exc
+            status = str(row.get("status", STATUS_CONNECTED))
+            if status not in {STATUS_CONNECTED, STATUS_EXPIRED, STATUS_REVOKED}:
+                raise ValueError("Synced account status is not recognized.")
+            staged.append(
+                ConnectedAccount(
+                    provider=provider, email=email,
+                    scopes=[scope for scope in scopes], expires_at=expires_at, status=status,
+                )
+            )
+        drop_keys: list[str] = []
+        for row in removed or []:
+            if not isinstance(row, dict):
+                raise ValueError("Synced removals must be objects.")
+            drop_keys.append(self._key(str(row.get("provider", "")), str(row.get("email", ""))))
+        for account in staged:
+            self._accounts[self._key(account.provider, account.email)] = account
+        dropped = 0
+        for key in drop_keys:
+            if self._accounts.pop(key, None) is not None:
+                dropped += 1
+        self._save()
+        return {"upserted": len(staged), "removed": dropped}
 
     def _require(self, provider: str, email: str) -> ConnectedAccount:
         account = self.get(provider, email)

@@ -1,4 +1,8 @@
-"""Phase 5 M5+M7: Gmail read-only connector, Outlook skeleton, fake adapter."""
+"""Phase 5 M5+M7: Gmail read-only connector and fake adapter.
+
+Outlook lives in ``test_outlook_connector.py`` now that it is a real
+Microsoft Graph connector instead of a skeleton.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +15,6 @@ import pytest
 from runtime.connectors.base import MailNotConnectedError, ResolvedAccount, resolve_account, AccountRef, AmbiguousAccountError
 from runtime.connectors.fake_adapter import FakeMailAdapter
 from runtime.connectors.gmail import GMAIL_READONLY_SCOPE, GmailConnector, parse_gmail_message
-from runtime.connectors.outlook import OUTLOOK_SKELETON_LABEL, OutlookConnector, OutlookSkeletonError
 from runtime.services.fake_provider import FAKE_LABEL
 
 ACCOUNT = ResolvedAccount(provider="gmail", email="ada@example.test")
@@ -170,21 +173,6 @@ def test_parse_gmail_message_prefers_plain_text():
         },
     })
     assert message["body"] == "plain words"
-
-
-def test_outlook_skeleton_labels_every_operation():
-    connector = OutlookConnector()
-    assert connector.provider_id == "outlook"
-    account = ResolvedAccount(provider="outlook", email="ada@example.test")
-    for call in (
-        lambda: connector.list_messages(account),
-        lambda: connector.search(account, "anything"),
-        lambda: connector.get_message(account, "msg-1"),
-        lambda: connector.get_thread(account, "thread-1"),
-    ):
-        with pytest.raises(OutlookSkeletonError) as error:
-            asyncio.run(call())
-        assert OUTLOOK_SKELETON_LABEL in str(error.value)
 
 
 def test_fake_adapter_carries_fake_label_on_everything():

@@ -168,6 +168,102 @@ export function youtubeEmbedUrl(videoId: string): string | null {
   return `https://www.youtube-nocookie.com/embed/${id}?rel=0&enablejsapi=1`;
 }
 
+/**
+ * Hosts the UI routes to the labeled system-browser fallback. Mirrors the
+ * Rust allowlist in src-tauri/src/lib.rs; the backend re-validates.
+ */
+export const SYSTEM_BROWSER_HOSTS = ["netflix.com", "www.netflix.com"];
+
+/** User-facing explanation for the Netflix fallback panel. */
+export const NETFLIX_FALLBACK_EXPLANATION =
+  "Netflix titles are DRM-protected, so they cannot play inside KeplerV — and KeplerV never attempts a workaround";
+
+/** Reassurance that the workspace context is preserved across the handoff. */
+export const INTENT_SPACE_RETURN_NOTE =
+  "Your Intent Space stays open here, so you can return any time";
+
+export interface ExternalMediaItem {
+  provider: string;
+  player: string;
+  url: string;
+  title: string;
+}
+
+export interface ExternalOpenTarget {
+  command: "open_system_browser" | "open_public_resource";
+  args: Record<string, unknown>;
+}
+
+export interface ExternalOpenPlan {
+  target: ExternalOpenTarget | null;
+  /** Toast shown only after the Tauri command succeeds. */
+  successNotice: string;
+  /** Toast shown when the item cannot be opened at all (no invoke attempted). */
+  blockedNotice: string | null;
+}
+
+function systemBrowserHost(raw: string): string | null {
+  try {
+    const host = new URL(raw).hostname.toLowerCase();
+    return SYSTEM_BROWSER_HOSTS.includes(host) ? host : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Route an external open: capability detect (non-embeddable providers such as
+ * Netflix) -> system-browser fallback, everything else https -> the separate
+ * in-app resource window. Never claims an outcome before invoke resolves.
+ */
+export function planExternalOpen(item: ExternalMediaItem): ExternalOpenPlan {
+  const needsSystemBrowser = item.provider === "Netflix" || systemBrowserHost(item.url) !== null;
+  if (needsSystemBrowser) {
+    const probe = probeNetflix();
+    if (!probe.embeddable) {
+      return {
+        target: { command: "open_system_browser", args: { url: item.url } },
+        successNotice: `Opened ${item.title} in the system browser. ${INTENT_SPACE_RETURN_NOTE}.`,
+        blockedNotice: null,
+      };
+    }
+  }
+  if (!/^https:\/\//i.test(item.url)) {
+    return {
+      target: null,
+      successNotice: "",
+      blockedNotice: "This document is included in KeplerV. Use Download or save a copy.",
+    };
+  }
+  return {
+    target: { command: "open_public_resource", args: { url: item.url, label: item.title } },
+    successNotice: `Opened ${item.title} in a separate window.`,
+    blockedNotice: null,
+  };
+}
+
+/**
+ * Run the external-open flow up to the Tauri invoke boundary. The notice
+ * callback fires exactly once with either the success, blocked, or error text.
+ */
+export async function openMediaExternally(
+  item: ExternalMediaItem,
+  invokeFn: (command: string, args: Record<string, unknown>) => Promise<unknown>,
+  notify: (message: string) => void,
+): Promise<void> {
+  const plan = planExternalOpen(item);
+  if (!plan.target) {
+    notify(plan.blockedNotice ?? "This item cannot be opened.");
+    return;
+  }
+  try {
+    await invokeFn(plan.target.command, plan.target.args);
+    notify(plan.successNotice);
+  } catch (error) {
+    notify(error instanceof Error ? error.message : String(error));
+  }
+}
+
 /** Resolve a spoken/button target word to a surface id. */
 export function resolveMediaTarget(word: string | undefined): MediaSurfaceId | null {
   if (!word) return null;

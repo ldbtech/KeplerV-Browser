@@ -265,9 +265,21 @@ fn authenticated_get(
     token: &str,
     path: &str,
 ) -> Result<Value, String> {
-    let response = client
-        .get(format!("{base_url}{path}"))
-        .bearer_auth(token)
+    authenticated_get_headers(client, base_url, token, path, &[])
+}
+
+fn authenticated_get_headers(
+    client: &Client,
+    base_url: &str,
+    token: &str,
+    path: &str,
+    headers: &[(String, String)],
+) -> Result<Value, String> {
+    let mut request = client.get(format!("{base_url}{path}")).bearer_auth(token);
+    for (name, value) in headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    let response = request
         .send()
         .map_err(|_| "Could not reach KeplerV's local runtime.".to_string())?;
     let status = response.status();
@@ -280,6 +292,129 @@ fn authenticated_get(
     response
         .json()
         .map_err(|_| "KeplerV runtime returned an unreadable response.".into())
+}
+
+fn authenticated_delete(
+    client: &Client,
+    base_url: &str,
+    token: &str,
+    path: &str,
+) -> Result<Value, String> {
+    let response = client
+        .delete(format!("{base_url}{path}"))
+        .bearer_auth(token)
+        .send()
+        .map_err(|_| "Could not reach KeplerV's local runtime.".to_string())?;
+    let status = response.status();
+    let payload: Value = response.json().unwrap_or_else(|_| json!({}));
+    if !status.is_success() {
+        return Err("KeplerV runtime request failed.".into());
+    }
+    Ok(payload)
+}
+
+/// Sidecar-only mail token bridge headers for one mail request.
+///
+/// Resolves the requested account from Rust metadata, reads its keychain
+/// entry, and forwards ONLY the access token plus non-secret binding headers
+/// over the trusted authed 127.0.0.1 channel. Returns no headers when the
+/// reference is ambiguous, the account is not connected, or no valid token
+/// exists — the sidecar then fails closed. The token is never logged and
+/// never returned to the frontend.
+fn mail_bridge_headers(
+    app: &AppHandle,
+    provider: Option<&str>,
+    email: Option<&str>,
+) -> Vec<(String, String)> {
+    let accounts = read_oauth_accounts(app);
+    let now = crate::oauth::current_time();
+    let Some(meta) = crate::oauth::resolve_oauth_account(&accounts, provider, email, now)
+    else {
+        return Vec::new();
+    };
+    if meta.provider == "fake-mail" {
+        return Vec::new();
+    }
+    let raw = oauth_keyring_entry(&meta.provider, &meta.email)
+        .ok()
+        .and_then(|entry| entry.get_password().ok());
+    let Some(raw) = raw else { return Vec::new() };
+    let Some(token) = crate::oauth::extract_valid_access_token(&raw, now) else {
+        return Vec::new();
+    };
+    vec![
+        ("x-keplerv-mail-token".to_string(), token),
+        ("x-keplerv-mail-provider".to_string(), meta.provider.clone()),
+        ("x-keplerv-mail-account".to_string(), meta.email.clone()),
+    ]
+}
+
+fn sidecar_credentials(state: &State<'_, RuntimeBridge>) -> Option<(String, String)> {
+    let slot = state.runtime.lock().ok()?;
+    let runtime = slot.as_ref()?;
+    Some((runtime.base_url.clone(), runtime.token.clone()))
+}
+
+/// Best-effort metadata sync of one account. Failures are ignored: the
+/// sidecar may not be running (OAuth works standalone) and Python fails
+/// closed without synced metadata anyway.
+fn push_account_sync(base_url: &str, token: &str, meta: &crate::oauth::ConnectedAccountMeta) {
+    let Ok(client) = authorized_client() else { return };
+    let _ = authenticated_post(
+        &client,
+        base_url,
+        token,
+        "/accounts/sync",
+        json!({"accounts": [meta], "removed": []}),
+    );
+}
+
+/// Best-effort bridge-token push for agent background tasks. The token rests
+/// only in sidecar memory (never disk/logs/JS) until expiry or eviction.
+fn push_mail_token(base_url: &str, token: &str, token_set: &crate::oauth::OAuthTokenSet) {
+    if token_set.provider == "fake-mail" {
+        return;
+    }
+    let Ok(client) = authorized_client() else { return };
+    let _ = authenticated_post(
+        &client,
+        base_url,
+        token,
+        "/accounts/tokens",
+        json!({
+            "provider": token_set.provider,
+            "email": token_set.account_email,
+            "access_token": token_set.access_token,
+            "expires_at": token_set.expires_at,
+        }),
+    );
+}
+
+/// Best-effort full bridge snapshot after a fresh runtime start.
+fn push_all_bridge_state(app: &AppHandle, base_url: &str, token: &str) {
+    let accounts = read_oauth_accounts(app);
+    let Ok(client) = authorized_client() else { return };
+    let _ = authenticated_post(
+        &client,
+        base_url,
+        token,
+        "/accounts/sync",
+        json!({"accounts": accounts, "removed": []}),
+    );
+    let now = crate::oauth::current_time();
+    for meta in accounts.iter().filter(|meta| {
+        meta.provider != "fake-mail"
+            && crate::oauth::effective_status(&meta.status, meta.expires_at, now) == "connected"
+    }) {
+        let raw = oauth_keyring_entry(&meta.provider, &meta.email)
+            .ok()
+            .and_then(|entry| entry.get_password().ok());
+        let Some(raw) = raw else { continue };
+        let Ok(token_set) = serde_json::from_str::<crate::oauth::OAuthTokenSet>(&raw) else {
+            continue;
+        };
+        push_mail_token(base_url, token, &token_set);
+    }
 }
 
 fn authenticated_post_bytes(
@@ -498,12 +633,15 @@ fn start_locked(app: &AppHandle, slot: &mut Option<ManagedRuntime>) -> Result<Va
     );
     *slot = Some(ManagedRuntime {
         child,
-        base_url,
-        token,
+        base_url: base_url.clone(),
+        token: token.clone(),
         poll_stop: stop,
         poller: Some(poller),
         model_configured: configured_key.is_some() || chatgpt_active || provider.starts_with("local-") || provider == "meta" && saved_secret("meta").is_some(),
     });
+    // Fresh sidecar: push the account metadata snapshot + bridge tokens so
+    // Python mail tools can resolve accounts without ever seeing the keychain.
+    push_all_bridge_state(app, &base_url, &token);
     Ok(
         json!({"status":"ready","model_configured":configured_key.is_some() || chatgpt_active || provider.starts_with("local-")}),
     )
@@ -819,6 +957,7 @@ pub fn runtime_snapshot(
 
 #[tauri::command]
 pub fn runtime_mail_list(
+    app: AppHandle,
     window: WebviewWindow,
     state: State<'_, RuntimeBridge>,
     provider: Option<String>,
@@ -836,16 +975,17 @@ pub fn runtime_mail_list(
         .ok_or_else(|| "Runtime is not running.".to_string())?;
     let client = authorized_client()?;
     let mut path = format!("/mail/messages?limit={}", limit.unwrap_or(10).clamp(1, 25));
-    if let Some(provider) = provider.filter(|value| !value.trim().is_empty()) {
+    if let Some(provider) = provider.as_ref().filter(|value| !value.trim().is_empty()) {
         path.push_str(&format!("&provider={}", urlencoding(provider.trim())));
     }
-    if let Some(email) = email.filter(|value| !value.trim().is_empty()) {
+    if let Some(email) = email.as_ref().filter(|value| !value.trim().is_empty()) {
         path.push_str(&format!("&email={}", urlencoding(email.trim())));
     }
     if let Some(query) = query.filter(|value| !value.trim().is_empty()) {
         path.push_str(&format!("&q={}", urlencoding(query.trim())));
     }
-    authenticated_get(&client, &runtime.base_url, &runtime.token, &path)
+    let bridge = mail_bridge_headers(&app, provider.as_deref(), email.as_deref());
+    authenticated_get_headers(&client, &runtime.base_url, &runtime.token, &path, &bridge)
 }
 
 fn urlencoding(value: &str) -> String {
@@ -854,6 +994,7 @@ fn urlencoding(value: &str) -> String {
 
 #[tauri::command]
 pub fn runtime_mail_get(
+    app: AppHandle,
     window: WebviewWindow,
     state: State<'_, RuntimeBridge>,
     message_id: String,
@@ -874,14 +1015,15 @@ pub fn runtime_mail_get(
     let client = authorized_client()?;
     let mut path = format!("/mail/messages/{}", urlencoding(message_id.trim()));
     let mut separator = "?";
-    if let Some(provider) = provider.filter(|value| !value.trim().is_empty()) {
+    if let Some(provider) = provider.as_ref().filter(|value| !value.trim().is_empty()) {
         path.push_str(&format!("{separator}provider={}", urlencoding(provider.trim())));
         separator = "&";
     }
-    if let Some(email) = email.filter(|value| !value.trim().is_empty()) {
+    if let Some(email) = email.as_ref().filter(|value| !value.trim().is_empty()) {
         path.push_str(&format!("{separator}email={}", urlencoding(email.trim())));
     }
-    authenticated_get(&client, &runtime.base_url, &runtime.token, &path)
+    let bridge = mail_bridge_headers(&app, provider.as_deref(), email.as_deref());
+    authenticated_get_headers(&client, &runtime.base_url, &runtime.token, &path, &bridge)
 }
 
 #[tauri::command]
@@ -1238,6 +1380,7 @@ pub fn runtime_guard_containment(
 pub async fn oauth_connect(
     app: AppHandle,
     window: WebviewWindow,
+    state: State<'_, RuntimeBridge>,
     provider: String,
     email: Option<String>,
 ) -> Result<Value, String> {
@@ -1248,6 +1391,7 @@ pub async fn oauth_connect(
     // OAuth waits, token exchange, and keychain writes are blocking. Keep them
     // off Tauri's async/UI executor so the main window stays responsive.
     let auth_app = app.clone();
+    let sidecar = sidecar_credentials(&state);
     let is_fake = provider == "fake-mail";
     let worker_result = tauri::async_runtime::spawn_blocking(move || {
         (|| {
@@ -1264,6 +1408,13 @@ pub async fn oauth_connect(
                 .map_err(|_| "Could not save the service connection in the system credential store.".to_string())?;
             let meta = crate::oauth::metadata_for(&token_set, "connected");
             write_oauth_metadata(&auth_app, &meta)?;
+            // Bridge the new account to the sidecar (best-effort): metadata
+            // sync plus an in-memory token for agent background tasks. The
+            // response below still carries metadata only.
+            if let Some((base_url, token)) = sidecar.as_ref() {
+                push_account_sync(base_url, token, &meta);
+                push_mail_token(base_url, token, &token_set);
+            }
             // Non-secret metadata only; tokens stay in the keychain.
             Ok::<Value, String>(json!({"connected":true,"account":meta}))
         })()
@@ -1282,11 +1433,13 @@ pub async fn oauth_connect(
 pub async fn oauth_refresh(
     app: AppHandle,
     window: WebviewWindow,
+    state: State<'_, RuntimeBridge>,
     provider: String,
     email: String,
 ) -> Result<Value, String> {
     ensure_main_window(&window)?;
     let auth_app = app.clone();
+    let sidecar = sidecar_credentials(&state);
     tauri::async_runtime::spawn_blocking(move || {
         (|| {
             let data_dir = auth_app.path().app_local_data_dir().map_err(|_| "Could not access service account settings.".to_string())?;
@@ -1299,6 +1452,10 @@ pub async fn oauth_refresh(
                 .map_err(|_| "Could not update the service connection in the system credential store.".to_string())?;
             let meta = crate::oauth::metadata_for(&refreshed, "connected");
             write_oauth_metadata(&auth_app, &meta)?;
+            if let Some((base_url, token)) = sidecar.as_ref() {
+                push_account_sync(base_url, token, &meta);
+                push_mail_token(base_url, token, &refreshed);
+            }
             Ok::<Value, String>(json!({"refreshed":true,"account":meta}))
         })()
     })
@@ -1310,6 +1467,7 @@ pub async fn oauth_refresh(
 pub fn oauth_disconnect(
     app: AppHandle,
     window: WebviewWindow,
+    state: State<'_, RuntimeBridge>,
     provider: String,
     email: String,
 ) -> Result<Value, String> {
@@ -1324,7 +1482,77 @@ pub fn oauth_disconnect(
     if let Ok(path) = oauth_metadata_path(&app, &provider, &email) {
         let _ = fs::remove_file(path);
     }
+    // Best-effort sidecar cleanup: drop the synced metadata and evict the
+    // in-memory bridge token so nothing usable remains Python-side.
+    if let Some((base_url, token)) = sidecar_credentials(&state) {
+        if let Ok(client) = authorized_client() {
+            let _ = authenticated_post(
+                &client,
+                &base_url,
+                &token,
+                "/accounts/sync",
+                json!({"accounts": [], "removed": [{"provider": provider, "email": email}]}),
+            );
+            let _ = authenticated_delete(
+                &client,
+                &base_url,
+                &token,
+                &format!(
+                    "/accounts/tokens?provider={}&email={}",
+                    urlencoding(provider.trim()),
+                    urlencoding(email.trim())
+                ),
+            );
+        }
+    }
     Ok(json!({"disconnected":true,"remote_revoked":remote_revoked}))
+}
+
+#[tauri::command]
+pub fn oauth_client_ids(app: AppHandle, window: WebviewWindow) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|_| "Could not access KeplerV settings.".to_string())?;
+    let raw = fs::read(dir.join("oauth-client-ids.json"))
+        .ok()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    // Public client IDs only (never secrets); safe to surface for editing.
+    let map = crate::oauth::parse_client_id_map(&raw);
+    let mut ids = serde_json::Map::new();
+    for provider in ["gmail", "outlook"] {
+        if let Some(value) = map.get(provider) {
+            ids.insert(provider.to_string(), Value::String(value.clone()));
+        }
+    }
+    Ok(json!({"client_ids": ids}))
+}
+
+#[tauri::command]
+pub fn oauth_client_id_save(
+    app: AppHandle,
+    window: WebviewWindow,
+    provider: String,
+    client_id: String,
+) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    let clean = crate::oauth::validate_client_id(&provider, &client_id)?;
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|_| "Could not access KeplerV settings.".to_string())?;
+    fs::create_dir_all(&dir).map_err(|_| "Could not prepare service account settings.".to_string())?;
+    let path = dir.join("oauth-client-ids.json");
+    let existing = fs::read(&path)
+        .ok()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+    let merged = crate::oauth::merge_client_id_map(existing.as_deref(), &provider, &clean)?;
+    let temp = dir.join("oauth-client-ids.json.tmp");
+    fs::write(&temp, merged).map_err(|_| "Could not save the client ID.".to_string())?;
+    fs::rename(temp, path).map_err(|_| "Could not save the client ID.".to_string())?;
+    Ok(json!({"saved": true, "provider": provider}))
 }
 
 #[tauri::command]

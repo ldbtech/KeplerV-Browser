@@ -5,7 +5,7 @@
   import type { Agent, AppState, ConnectedAccount, EmailDraft, Evidence, ExternalAgentInfo, GatewayMessageInfo, GatewaySessionInfo, Goal, KeplerEvent, MailMessage, MediaFocusState, MediaSurfaceId, Resource, ServiceProviderId, SessionVerification } from "./types";
   import { accountKey, parseAccountKey, resolveAccount } from "./experience/accountResolver";
   import { buildExternalNodes, compareOffersForSpeech, describeVerificationForSpeech, extractClaims, graphExternalY, latestPricedOffer, operatorHost, redactedCredentialFields, resolveSessionTarget, shortAgentName, summarizeSessionForSpeech, tierBadge, whyFlaggedForSpeech } from "./experience/gatewayGraph";
-  import { applyMediaCommand, createSurfaceState, duckForSpeech, resolveMediaTarget } from "./experience/surfaceManager";
+  import { INTENT_SPACE_RETURN_NOTE, NETFLIX_FALLBACK_EXPLANATION, NETFLIX_FALLBACK_LABEL, applyMediaCommand, createSurfaceState, duckForSpeech, openMediaExternally, probeNetflix, resolveMediaTarget } from "./experience/surfaceManager";
   import { buildLearningLibrary, vimeoEmbedFromUrl, youtubeEmbedFromUrl, type LearningMediaItem } from "./experience/learningLibrary";
   import { initialState, makeId, STORAGE_KEY } from "./simulation/seed";
   import { addTask, advanceSimulationClock, appendEvent, auditAction, canSpawn, createAgent, createGoal, modifyGoal, setOfflineMode, spawnSubagent, transitionAgent } from "./simulation/runtime";
@@ -76,6 +76,11 @@
   let connectedAccounts: ConnectedAccount[] = [];
   let connectingService: ServiceProviderId | null = null;
   let serviceError = "";
+  let oauthClientIds: Record<string, string> = {};
+  let gmailClientIdDraft = "";
+  let outlookClientIdDraft = "";
+  let savingClientId: string | null = null;
+  let clientIdError = "";
   let mailAccountKey = "";
   let mailMessages: MailMessage[] = [];
   let mailQuery = "";
@@ -215,6 +220,7 @@
       if (activeProvider !== "meta" && activeProvider !== "chatgpt") chooseConnectProvider(activeProvider);
     }).catch(() => {});
     void refreshServiceAccounts();
+    void refreshOAuthClientIds();
     let disposed = false;
     void listen<RuntimeEvent>("runtime:event", (event) => mergeRuntimeEvents([event.payload])).then((unlisten) => {
       if (disposed) unlisten(); else runtimeUnlisten = unlisten;
@@ -252,6 +258,7 @@
   $: goalAgents = activeGoal ? agents.filter((agent) => agent.goalId === activeGoal.id) : [];
   $: goalGatewaySessions = activeGoal ? gatewaySessions.filter((session) => agents.some((agent) => agent.runId === session.run_id && agent.goalId === activeGoal.id)) : [];
   $: externalGraphNodes = buildExternalNodes(goalGatewaySessions, gatewayAgents);
+  $: netflixCapability = probeNetflix();
   $: activeSession = gatewaySessions.find((item) => item.id === selectedSessionId) ?? null;
   $: activeSessionAgent = activeSession ? gatewayAgents.find((item) => item.agent_id === activeSession.external_agent_id) ?? null : null;
   $: activeSessionClaims = extractClaims(sessionTranscript);
@@ -408,6 +415,28 @@
       const result = await invoke<{ accounts: ConnectedAccount[] }>("account_status");
       connectedAccounts = result.accounts;
     } catch { connectedAccounts = []; }
+  }
+  async function refreshOAuthClientIds() {
+    try {
+      const result = await invoke<{ client_ids: Record<string, string> }>("oauth_client_ids");
+      oauthClientIds = result.client_ids;
+      if (!gmailClientIdDraft) gmailClientIdDraft = result.client_ids.gmail ?? "";
+      if (!outlookClientIdDraft) outlookClientIdDraft = result.client_ids.outlook ?? "";
+    } catch { oauthClientIds = {}; }
+  }
+  async function saveOAuthClientId(provider: "gmail" | "outlook") {
+    if (savingClientId) return;
+    savingClientId = provider;
+    clientIdError = "";
+    const draft = provider === "gmail" ? gmailClientIdDraft : outlookClientIdDraft;
+    try {
+      await invoke<{ saved: boolean; provider: string }>("oauth_client_id_save", { provider, clientId: draft });
+      oauthClientIds = { ...oauthClientIds, [provider]: draft.trim() };
+      showNotice(`${provider === "gmail" ? "Gmail" : "Outlook"} client ID saved on this device.`);
+    } catch (error) {
+      clientIdError = error instanceof Error ? error.message : String(error);
+      showNotice(clientIdError);
+    } finally { savingClientId = null; }
   }
   async function connectService(provider: ServiceProviderId) {
     if (connectingService) return;
@@ -836,10 +865,7 @@
   function closeMediaLibrary(): void { mediaLibraryOpen = false; }
   function openSelectedMediaExternally(): void {
     if (!selectedMediaItem) return;
-    if (!/^https:\/\//i.test(selectedMediaItem.url)) { showNotice("This document is included in KeplerV. Use Download or save a copy."); return; }
-    void invoke("open_public_resource", { url: selectedMediaItem.url, label: selectedMediaItem.title })
-      .then(() => showNotice(`Opened ${selectedMediaItem?.title ?? "resource"} in the system browser.`))
-      .catch((error) => showNotice(String(error)));
+    void openMediaExternally(selectedMediaItem, invoke, showNotice);
   }
   function pushVoiceTurn(role: string, text: string): void {
     voiceConversation = [...voiceConversation.slice(-7), { role, text: text.slice(0, 500) }];
@@ -1022,7 +1048,7 @@
     pendingEmailSend = null;
     closePanel(); presence = "resting";
     if (approved && draft) {
-      showNotice(`Approval recorded for the draft to ${draft.to}. Nothing was sent: the mail connector is read-only.`);
+      showNotice(`Approval recorded for the draft to ${draft.to}. This draft stays unsent: live mail is sent only by approved agent mail tools.`);
     } else {
       showNotice("Email send declined. No draft was sent.");
     }
@@ -1515,7 +1541,8 @@
           <video class="media-video" bind:this={localVideoEl} src={selectedMediaItem!.url} controls playsinline preload="metadata" title={selectedMediaItem!.title}></video>
         {:else if selectedMediaItem!.player === "pdf"}<iframe class="learning-pdf-frame" src={`${mediaFrameUrl}#view=FitH`} title={`PDF: ${selectedMediaItem!.title}`}></iframe>
         {:else if selectedMediaItem!.player === "web"}<iframe class="media-frame" src={selectedMediaItem!.url} title={selectedMediaItem!.title} referrerpolicy="no-referrer"></iframe>
-        {:else}<div class="learning-media-unavailable"><h3>{selectedMediaItem!.provider === "Netflix" ? "Continue watching with Netflix" : "Open this file"}</h3><p>{selectedMediaItem!.provider === "Netflix" ? "Playback stays in Netflix. KeplerV will open the source in your browser." : "This file is hosted by its source website."}</p><button class="object-primary" onclick={openSelectedMediaExternally}>Open {selectedMediaItem!.provider} ↗</button></div>{/if}
+        {:else if selectedMediaItem!.provider === "Netflix" && !netflixCapability.embeddable}<div class="learning-media-unavailable"><h3>Continue watching with Netflix</h3><p>{NETFLIX_FALLBACK_EXPLANATION}. One click opens this title in your system browser — no embedded playback is attempted.</p><p class="subtle">{NETFLIX_FALLBACK_LABEL}. {INTENT_SPACE_RETURN_NOTE}.</p><button class="object-primary" onclick={openSelectedMediaExternally}>Open Netflix ↗</button></div>
+        {:else}<div class="learning-media-unavailable"><h3>Open this file</h3><p>This file is hosted by its source website.</p><button class="object-primary" onclick={openSelectedMediaExternally}>Open {selectedMediaItem!.provider} ↗</button></div>{/if}
       </div><aside class="learning-media-details"><span>ABOUT THIS PICK</span><h2>{selectedMediaItem!.title}</h2><p>{selectedMediaItem!.summary}</p>{#if selectedMediaItem!.quote}<blockquote>“{selectedMediaItem!.quote}”</blockquote>{/if}<div><small>PROVIDED BY</small><b>{selectedMediaItem!.createdBy ? agents.find((agent) => agent.id === selectedMediaItem!.createdBy)?.name ?? selectedMediaItem!.createdBy : "KeplerV"}</b></div><div><small>SOURCE</small><b>{new URL(selectedMediaItem!.url, window.location.href).hostname}</b></div>{#if selectedMediaItem!.player === "pdf" || selectedMediaItem!.player === "external"}<a class="learning-download" href={selectedMediaItem!.url} download={selectedMediaItem!.player === "pdf"}>Download or save a copy ↓</a>{/if}<button class="secondary-wide" onclick={openSelectedMediaExternally}>Open original source ↗</button></aside></div>
       <footer class="media-frame-note"><span>Saved for {activeGoal?.title ?? "this workspace"}</span>{#if mediaSurface}<span class="media-transport"><button onclick={() => pauseMedia()}>Pause</button><button onclick={() => resumeMedia()}>Resume</button></span>{/if}</footer>
     </section>
@@ -1570,7 +1597,10 @@
         {:else}<p class="provider-connect-note">No service accounts connected. Connect one to let research read mail with your approval.</p>{/if}
         <div class="provider-connect-actions"><button class="provider-default" disabled={connectingService !== null} onclick={() => connectService("gmail")}>{connectingService === "gmail" ? "Waiting for sign-in…" : "Connect Gmail"}</button><button class="provider-default" disabled={connectingService !== null} onclick={() => connectService("outlook")}>{connectingService === "outlook" ? "Waiting for sign-in…" : "Connect Outlook"}</button><button class="provider-default" disabled={connectingService !== null} onclick={() => connectService("fake-mail")}>{connectingService === "fake-mail" ? "Connecting…" : "Connect Fake Mail (test fixture)"}</button></div>
         {#if serviceError}<p class="chatgpt-connect-error" role="alert">{serviceError}</p>{/if}
-        <small class="provider-security-note">OAuth tokens are stored in the system keychain, separate from model API keys. Fake Mail is a clearly-labeled local fixture — never live mail.</small></section>
+        <form class="provider-form" onsubmit={(event) => { event.preventDefault(); void saveOAuthClientId("gmail"); }}><label>GMAIL CLIENT ID<input bind:value={gmailClientIdDraft} placeholder={oauthClientIds.gmail ? "Saved — paste a new ID to replace it" : "Paste your Google OAuth client ID"} autocomplete="off" /></label><div class="provider-connect-actions"><button class="provider-default" type="submit" disabled={savingClientId !== null}>{savingClientId === "gmail" ? "Saving…" : oauthClientIds.gmail ? "Replace Gmail client ID" : "Save Gmail client ID"}</button></div></form>
+        <form class="provider-form" onsubmit={(event) => { event.preventDefault(); void saveOAuthClientId("outlook"); }}><label>OUTLOOK CLIENT ID<input bind:value={outlookClientIdDraft} placeholder={oauthClientIds.outlook ? "Saved — paste a new ID to replace it" : "Paste your Microsoft application (client) ID"} autocomplete="off" /></label><div class="provider-connect-actions"><button class="provider-default" type="submit" disabled={savingClientId !== null}>{savingClientId === "outlook" ? "Saving…" : oauthClientIds.outlook ? "Replace Outlook client ID" : "Save Outlook client ID"}</button></div></form>
+        {#if clientIdError}<p class="chatgpt-connect-error" role="alert">{clientIdError}</p>{/if}
+        <small class="provider-security-note">OAuth tokens are stored in the system keychain, separate from model API keys. Client IDs are public (never secrets) and stay in a settings file on this device. Fake Mail is a clearly-labeled local fixture — never live mail.</small></section>
       <section class="provider-connect-card"><div class="provider-card-top"><span class="provider-avatar">✉</span><div><b>Mail</b><small>Read connected accounts · sending needs approval</small></div><span class="connection-state">{mailLoading ? "LOADING" : mailMessages.length ? `${mailMessages.length} SHOWN` : "NOTHING LOADED"}</span></div>
         {#if connectedAccounts.length}
           <form class="provider-form" onsubmit={(event) => { event.preventDefault(); void loadMail(selectedMailAccount(), mailQuery); }}><label>ACCOUNT<select bind:value={mailAccountKey}><option value="">Pick an account…</option>{#each connectedAccounts as account}<option value={accountKey(account)}>{account.email} ({account.provider})</option>{/each}</select></label><label>SEARCH MAIL<input bind:value={mailQuery} placeholder="enrollment, atlas…" /></label><button class="object-primary" type="submit" disabled={mailLoading}>{mailLoading ? "Loading…" : "Load mail"}</button></form>
@@ -1578,7 +1608,7 @@
           {#if mailMessages.length}<div class="provider-saved-list">{#each mailMessages as message}<article><div><b>{message.subject}</b><small>{message.from ?? ""}{message.date ? ` · ${message.date}` : ""}{message.fake ? " · FAKE FIXTURE" : ""}</small></div><div><button class="provider-default" onclick={() => { const account = selectedMailAccount(); if (account) void readMailMessage(account, message.id); }}>Read</button></div></article>{/each}</div>{/if}
           {#if mailSelected}<article class="mail-reading"><div class="inspector-block"><span>{mailSelected.fake ? (mailSelected.label ?? "FAKE FIXTURE") : `FROM ${mailSelected.from ?? "unknown"}`}</span><b>{mailSelected.subject}</b><small>{mailSelected.date ?? ""}</small><p>{mailSelected.body || mailSelected.snippet || "No preview available."}</p></div><button class="secondary-wide" onclick={() => mailSelected = null}>Close message</button></article>{/if}
         {:else}<p class="provider-connect-note">Connect an account above first. Nothing is shown without a connection.</p>{/if}
-        {#if emailDraft}<article class="mail-draft"><div class="inspector-block"><span>UNSENT DRAFT</span><b>To: {emailDraft.to}</b><small>{emailDraft.subject || "(no subject)"}{emailDraft.accountEmail ? ` · via ${emailDraft.accountEmail}` : ""}</small><p>{emailDraft.body || "(empty body)"}</p></div><div class="provider-connect-actions"><button class="provider-default" onclick={() => { pendingEmailSend = emailDraft; panel = "approval"; }}>Request approval to send</button><button class="provider-default" onclick={() => emailDraft = null}>Discard draft</button></div><small class="provider-security-note">Drafts are never sent automatically. Sending needs your explicit approval, and the mail connector is read-only.</small></article>{/if}
+        {#if emailDraft}<article class="mail-draft"><div class="inspector-block"><span>UNSENT DRAFT</span><b>To: {emailDraft.to}</b><small>{emailDraft.subject || "(no subject)"}{emailDraft.accountEmail ? ` · via ${emailDraft.accountEmail}` : ""}</small><p>{emailDraft.body || "(empty body)"}</p></div><div class="provider-connect-actions"><button class="provider-default" onclick={() => { pendingEmailSend = emailDraft; panel = "approval"; }}>Request approval to send</button><button class="provider-default" onclick={() => emailDraft = null}>Discard draft</button></div><small class="provider-security-note">Drafts are never sent automatically. Live sending happens only through agent mail tools after your explicit grant and approval.</small></article>{/if}
         <small class="provider-security-note">Agent browsers run in isolated sessions with no shared cookies; your sign-in stays in the app window.</small></section>
       {#if connectedCredentials.some((provider) => !["meta", "chatgpt"].includes(provider))}<section class="provider-saved-list"><h3>Connected providers</h3>{#each connectedCredentials.filter((provider) => !["meta", "chatgpt"].includes(provider)) as provider}<article><div><b>{provider === "local-ollama" ? "Ollama" : provider === "local-lmstudio" ? "LM Studio" : provider === "local-openai-compatible" ? "Local model" : provider === "openai-compatible" ? "Custom OpenAI-compatible" : provider[0].toUpperCase() + provider.slice(1)}</b><small>{activeProvider === provider ? `Active · ${activeModel}` : "Connected on this device"}</small></div><div><button class="provider-default" disabled={activeProvider === provider} onclick={() => activateProviderConnection(provider)}>{activeProvider === provider ? "Active" : "Use for research"}</button><button class="provider-remove" aria-label={`Disconnect ${provider}`} onclick={() => removeCredential(provider)}>×</button></div></article>{/each}</section>{/if}
       <p class="provider-footnote">You can connect several providers here. The active provider and model are shown above; connecting another provider switches research to it.</p>
@@ -1623,7 +1653,7 @@
         {#if activeSession.status === "open"}<button class="danger-button" onclick={() => closeGatewaySession(activeSession!.id)}>Close session</button>{/if}
         <button class="secondary-wide" onclick={closePanel}>Back to workspace</button>
       </div>{/if}
-    {:else if panel === "approval" && (pendingEmailSend || state.approval)}{#if pendingEmailSend}<div class="approval-card"><span>HUMAN APPROVAL REQUIRED</span><h3>Email send request</h3><p>KeplerV prepared an email draft. Review it before recording an approval decision. Nothing is sent automatically.</p><div class="approval-detail"><span>TO</span><b>{pendingEmailSend.to}</b></div><div class="approval-detail"><span>SUBJECT</span><b>{pendingEmailSend.subject || "(no subject)"}</b></div><div class="approval-detail"><span>VIA</span><b>{pendingEmailSend.accountEmail ?? "default account"}</b></div><div class="approval-detail"><span>BODY</span><b>{pendingEmailSend.body.slice(0, 280) || "(empty body)"}</b></div><div class="approval-detail"><span>AIP</span><b>REQUIRE APPROVAL</b></div><div class="panel-actions approval-actions"><button class="object-primary" onclick={() => decideEmailSend(true)}>Approve request</button><button class="danger-button" onclick={() => decideEmailSend(false)}>Deny request</button></div><p class="subtle">Approval records a decision in KeplerV; the mail connector is read-only, so no email is transmitted.</p></div>{:else if state.approval}<div class="approval-card"><span>HUMAN APPROVAL REQUIRED</span><h3>Tuition payment request</h3><p>A finance agent requested a tuition transfer. Review this request before recording an approval decision.</p><div class="approval-amount">$750 <small>REQUEST AMOUNT</small></div><div class="approval-detail"><span>AGENT</span><b>{agents.find((agent) => agent.id === state.approval?.agentId)?.name}</b></div><div class="approval-detail"><span>AIP</span><b>REQUIRE APPROVAL</b></div><div class="approval-detail"><span>REQUEST</span><b>{state.approval.action}</b></div><div class="panel-actions approval-actions"><button class="object-primary" onclick={() => decideApproval(true)} disabled={state.approval.status !== "pending"}>Approve request</button><button class="danger-button" onclick={() => decideApproval(false)} disabled={state.approval.status !== "pending"}>Deny request</button><button class="secondary-wide" onclick={() => { const agent = agents.find((item) => item.id === state.approval?.agentId); if (agent) commit(transitionAgent(state, agent.id, "pause")); closePanel(); }}>Pause agent</button></div><p class="subtle">Approval records a decision in KeplerV; no payment is sent.</p></div>{/if}{/if}
+    {:else if panel === "approval" && (pendingEmailSend || state.approval)}{#if pendingEmailSend}<div class="approval-card"><span>HUMAN APPROVAL REQUIRED</span><h3>Email send request</h3><p>KeplerV prepared an email draft. Review it before recording an approval decision. Nothing is sent automatically.</p><div class="approval-detail"><span>TO</span><b>{pendingEmailSend.to}</b></div><div class="approval-detail"><span>SUBJECT</span><b>{pendingEmailSend.subject || "(no subject)"}</b></div><div class="approval-detail"><span>VIA</span><b>{pendingEmailSend.accountEmail ?? "default account"}</b></div><div class="approval-detail"><span>BODY</span><b>{pendingEmailSend.body.slice(0, 280) || "(empty body)"}</b></div><div class="approval-detail"><span>AIP</span><b>REQUIRE APPROVAL</b></div><div class="panel-actions approval-actions"><button class="object-primary" onclick={() => decideEmailSend(true)}>Approve request</button><button class="danger-button" onclick={() => decideEmailSend(false)}>Deny request</button></div><p class="subtle">Approval records a decision in KeplerV; this draft itself is never transmitted.</p></div>{:else if state.approval}<div class="approval-card"><span>HUMAN APPROVAL REQUIRED</span><h3>Tuition payment request</h3><p>A finance agent requested a tuition transfer. Review this request before recording an approval decision.</p><div class="approval-amount">$750 <small>REQUEST AMOUNT</small></div><div class="approval-detail"><span>AGENT</span><b>{agents.find((agent) => agent.id === state.approval?.agentId)?.name}</b></div><div class="approval-detail"><span>AIP</span><b>REQUIRE APPROVAL</b></div><div class="approval-detail"><span>REQUEST</span><b>{state.approval.action}</b></div><div class="panel-actions approval-actions"><button class="object-primary" onclick={() => decideApproval(true)} disabled={state.approval.status !== "pending"}>Approve request</button><button class="danger-button" onclick={() => decideApproval(false)} disabled={state.approval.status !== "pending"}>Deny request</button><button class="secondary-wide" onclick={() => { const agent = agents.find((item) => item.id === state.approval?.agentId); if (agent) commit(transitionAgent(state, agent.id, "pause")); closePanel(); }}>Pause agent</button></div><p class="subtle">Approval records a decision in KeplerV; no payment is sent.</p></div>{/if}{/if}
   </div>{/if}
 
   {#if notice}<div class="toast" role="status">{notice}<button aria-label="Dismiss notification" onclick={() => notice = ""}>×</button></div>{/if}

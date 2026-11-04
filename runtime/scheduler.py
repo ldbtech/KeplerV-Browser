@@ -22,11 +22,12 @@ from runtime.connectors.base import (
     AccountRef,
     AmbiguousAccountError,
     MailNotConnectedError,
+    ResolvedAccount,
     resolve_account,
 )
 from runtime.connectors.fake_adapter import FakeMailAdapter
-from runtime.connectors.gmail import GmailConnector
-from runtime.connectors.outlook import OutlookConnector
+from runtime.connectors.gmail import GMAIL_SEND_SCOPE, GmailConnector, GmailSender
+from runtime.connectors.outlook import OUTLOOK_SEND_SCOPE, OutlookConnector, OutlookSender
 from runtime.gateway.registry import ExternalAgentRegistry
 from runtime.gateway.sessions import GatewaySessionStore
 from runtime.gateway.tools import (
@@ -40,6 +41,7 @@ from runtime.gateway.tools import (
     GatewayVerifyArgs,
 )
 from runtime.services.fake_services import FakeServiceAdapter
+from runtime.services.mail_token_vault import MailTokenVault, request_token_for
 from runtime.services.permissions import REVOKE_ACTION, grant_to, revoke_from
 from runtime.services.registry import STATUS_CONNECTED, ServiceRegistry
 from runtime.models import RunRequest
@@ -248,6 +250,7 @@ class RuntimeService:
         search_func: Callable[..., Any] = search_public_web,
         service_registry: ServiceRegistry | None = None,
         mail_connectors: dict[str, Any] | None = None,
+        mail_token_vault: MailTokenVault | None = None,
         service_adapter: FakeServiceAdapter | None = None,
         gateway_transport: Any | None = None,
         gateway_fixture_allowlist: set[str] | None = None,
@@ -258,6 +261,8 @@ class RuntimeService:
         self.providers = providers or ProviderRegistry()
         self.service_registry = service_registry
         self._mail_connectors = mail_connectors
+        self.mail_tokens = mail_token_vault or MailTokenVault()
+        self._mail_http: Any | None = None
         self._service_adapter = service_adapter
         self._gateway_transport = gateway_transport
         self._gateway_fixture_allowlist = set(gateway_fixture_allowlist or set())
@@ -389,19 +394,57 @@ class RuntimeService:
         })
         return self.agent_view(self.store.get_run(run_id) or run)
 
+    def _mail_http_client(self) -> Any:
+        """Shared HTTPS client for live mail. Created lazily, closed on shutdown."""
+        if self._mail_http is None:
+            import httpx
+
+            self._mail_http = httpx.AsyncClient(timeout=15.0)
+        return self._mail_http
+
+    async def aclose(self) -> None:
+        """Release the shared live-mail HTTP client (lifespan shutdown)."""
+        client, self._mail_http = self._mail_http, None
+        if client is not None:
+            await client.aclose()
+
+    def _mail_token_supplier(self, account: ResolvedAccount) -> str | None:
+        """Bridge token for one account: request-scoped first, vault second.
+
+        Returns None when no token was injected, so connectors fail closed
+        with MailNotConnectedError instead of returning anything.
+        """
+        return request_token_for(account.provider, account.email) or self.mail_tokens.get(
+            account.provider, account.email
+        )
+
     def _mail_connector(self, provider: str) -> Any:
         if self._mail_connectors and provider in self._mail_connectors:
             return self._mail_connectors[provider]
         if provider == "fake-mail":
             return FakeMailAdapter()
         if provider == "gmail":
-            # No token supplier here: live Gmail tokens stay in the Rust
-            # keychain, so without injected credentials this raises a
-            # disconnected error instead of returning anything.
-            return GmailConnector()
+            return GmailConnector(
+                client=self._mail_http_client(), token_supplier=self._mail_token_supplier
+            )
         if provider == "outlook":
-            return OutlookConnector()
+            return OutlookConnector(
+                client=self._mail_http_client(), token_supplier=self._mail_token_supplier
+            )
         raise ValueError(f"Unknown mail provider '{provider}'.")
+
+    def _mail_sender(self, provider: str) -> Any:
+        """Live sender for one provider. Fake mail has no sender: it keeps
+        the clearly-labeled fake outbox instead."""
+        if provider == "gmail":
+            return GmailSender(
+                client=self._mail_http_client(), token_supplier=self._mail_token_supplier
+            )
+        if provider == "outlook":
+            return OutlookSender(
+                client=self._mail_http_client(), token_supplier=self._mail_token_supplier
+            )
+        raise ValueError(f"Provider '{provider}' has no live send path.")
 
     async def execute_mail_tool(self, run: dict[str, Any], name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Resolve account, enforce status, and run a read-only mail tool.
@@ -449,11 +492,13 @@ class RuntimeService:
         return {"ok": True, "result": result}
 
     async def execute_service_send(self, run: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any]:
-        """Run gmail.send after AIP grant + approval. Fake outbox only.
+        """Run gmail.send after AIP grant + approval.
 
-        The account must resolve to a connected, non-revoked account, and
-        only the clearly-labeled fake-mail fixture can send — real providers
-        fail loudly here instead of silently substituting anything.
+        The account must resolve to a connected, non-revoked account. The
+        fake-mail fixture keeps its clearly-labeled fake outbox; live
+        providers transmit through their official API with a bridge token
+        and return a clearly-labeled live receipt. Without a session the
+        send fails closed — nothing is sent and nothing is substituted.
         """
         registry = self._services()
         try:
@@ -472,14 +517,28 @@ class RuntimeService:
         status = registry.effective_status(meta)
         if status != STATUS_CONNECTED:
             return {"ok": False, "error": f"Account {meta.email} is {status}. Reconnect it to send mail."}
-        if resolved.provider != "fake-mail":
+        if resolved.provider == "fake-mail":
+            try:
+                result = await self._fake_services().send_gmail(
+                    resolved.email, arguments["to"], arguments["subject"], arguments["body"])
+            except (ValueError, KeyError) as exc:
+                return {"ok": False, "error": str(exc)[:500]}
+            result.setdefault("content_is_untrusted", True)
+            return {"ok": True, **result}
+        if resolved.provider not in {"gmail", "outlook"}:
+            return {"ok": False, "error": f"Provider '{resolved.provider}' has no send path. Nothing was sent."}
+        required_scope = GMAIL_SEND_SCOPE if resolved.provider == "gmail" else OUTLOOK_SEND_SCOPE
+        if required_scope not in (meta.scopes or []):
             return {"ok": False, "error": (
-                "Live send is not wired: only the labeled fake-mail fixture supports "
-                "gmail.send in tests and demos. Nothing was sent.")}
+                f"Account {meta.email} was connected without the {required_scope} scope. "
+                "Reconnect it to grant send permission. Nothing was sent.")}
         try:
-            result = await self._fake_services().send_gmail(
-                resolved.email, arguments["to"], arguments["subject"], arguments["body"])
-        except (ValueError, KeyError) as exc:
+            sender = self._mail_sender(resolved.provider)
+            result = await sender.send_message(
+                resolved, arguments["to"], arguments["subject"], arguments["body"])
+        except MailNotConnectedError as exc:
+            return {"ok": False, "error": str(exc)[:500]}
+        except (ValueError, KeyError, RuntimeError) as exc:
             return {"ok": False, "error": str(exc)[:500]}
         result.setdefault("content_is_untrusted", True)
         return {"ok": True, **result}

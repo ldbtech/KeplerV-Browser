@@ -6,14 +6,28 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 
-from runtime.models import ControlRequest, MailListQuery, MailReadQuery, RunRequest
+from runtime.models import (
+    AccountSyncRequest,
+    ControlRequest,
+    MailListQuery,
+    MailReadQuery,
+    MailTokenPush,
+    RunRequest,
+)
 from runtime.guard.schemas import GuardContainmentRequest, GuardTransitionRequest
 from runtime.guard.evidence import GuardEvidenceService
 from runtime.guard.detective import GuardInvestigationError
 from runtime.guard.interrogation import GuardInterviewError
 from runtime.scheduler import RuntimeService
 from runtime.connectors.base import AccountRef, AmbiguousAccountError, MailNotConnectedError, resolve_account
-from runtime.services.registry import STATUS_CONNECTED
+from runtime.services.mail_token_vault import (
+    MAIL_TOKEN_ACCOUNT_HEADER,
+    MAIL_TOKEN_HEADER,
+    MAIL_TOKEN_PROVIDER_HEADER,
+    MAX_TOKEN_LENGTH,
+    use_request_token,
+)
+from runtime.services.registry import STATUS_CONNECTED, STATUS_REVOKED
 from runtime.voice.transcribe import MetaVoiceTranscriber, VoiceTranscriptionError
 from runtime.voice.intent import InterpretationError, InterpretRequest, interpret as interpret_voice_command
 from runtime.demo.university import PAGES, page_html
@@ -30,6 +44,10 @@ def create_app(service: RuntimeService | None = None) -> FastAPI:
         except Exception:
             pass
         yield
+        try:
+            await app.state.runtime_service.aclose()
+        except Exception:
+            pass
 
     app = FastAPI(title="KeplerV local runtime", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 
@@ -107,6 +125,21 @@ def create_app(service: RuntimeService | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc))
         return resolved, connector
 
+    def _request_mail_token(request: Request, provider: str, email: str) -> str | None:
+        """Sidecar-only per-request token, honored only when bound to the
+        resolved account. Rust sets these headers; they never reach JS, are
+        never logged, and never persist beyond the request."""
+        token = request.headers.get(MAIL_TOKEN_HEADER, "")
+        bound_provider = request.headers.get(MAIL_TOKEN_PROVIDER_HEADER, "")
+        bound_email = request.headers.get(MAIL_TOKEN_ACCOUNT_HEADER, "")
+        if not token or len(token) > MAX_TOKEN_LENGTH:
+            return None
+        if bound_provider.strip().lower() != provider.strip().lower():
+            return None
+        if bound_email.strip().lower() != email.strip().lower():
+            return None
+        return token
+
     @app.get("/accounts")
     async def list_service_accounts(request: Request, _: None = Depends(authenticated)):
         service = request.app.state.runtime_service
@@ -122,6 +155,52 @@ def create_app(service: RuntimeService | None = None) -> FastAPI:
             })
         return {"providers": registry.providers(), "accounts": accounts}
 
+    @app.post("/accounts/sync")
+    async def sync_service_accounts(body: AccountSyncRequest, request: Request, _: None = Depends(authenticated)):
+        """Apply Rust-pushed account metadata. Non-secret rows only: the
+        request model forbids extra fields, so tokens pushed here are
+        rejected with 422 instead of stored."""
+        service = request.app.state.runtime_service
+        try:
+            result = service._services().sync_accounts(
+                [item.model_dump(mode="json") for item in body.accounts],
+                [item.model_dump(mode="json") for item in body.removed],
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)[:500])
+        for item in body.removed:
+            service.mail_tokens.evict(item.provider, item.email)
+        for item in body.accounts:
+            if item.status == STATUS_REVOKED:
+                service.mail_tokens.evict(item.provider, item.email)
+        return result
+
+    @app.post("/accounts/tokens")
+    async def push_mail_token(body: MailTokenPush, request: Request, _: None = Depends(authenticated)):
+        """Hold one Rust-pushed bridge token in memory. Never persisted,
+        never logged, never echoed back: the response confirms only."""
+        service = request.app.state.runtime_service
+        try:
+            service._services().describe(body.provider.strip().lower())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)[:500])
+        try:
+            service.mail_tokens.put(body.provider, body.email, body.access_token, body.expires_at)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)[:500])
+        return {"stored": True, "provider": body.provider.strip().lower()}
+
+    @app.delete("/accounts/tokens")
+    async def evict_mail_token(
+        request: Request,
+        provider: str = Query(max_length=64),
+        email: str = Query(max_length=256),
+        _: None = Depends(authenticated),
+    ):
+        """Drop one account's bridge token (Rust calls this on disconnect)."""
+        evicted = request.app.state.runtime_service.mail_tokens.evict(provider, email)
+        return {"evicted": evicted}
+
     @app.get("/mail/messages")
     async def list_mail_messages(
         request: Request,
@@ -134,10 +213,12 @@ def create_app(service: RuntimeService | None = None) -> FastAPI:
         query = MailListQuery(provider=provider, email=email, query=q, limit=limit)
         service = request.app.state.runtime_service
         resolved, connector = _resolve_mail_account(service, query.provider, query.email)
+        token = _request_mail_token(request, resolved.provider, resolved.email)
         try:
-            if query.query:
-                return await connector.search(resolved, query.query, limit=query.limit)
-            return await connector.list_messages(resolved, limit=query.limit)
+            with use_request_token(resolved.provider, resolved.email, token):
+                if query.query:
+                    return await connector.search(resolved, query.query, limit=query.limit)
+                return await connector.list_messages(resolved, limit=query.limit)
         except MailNotConnectedError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except (ValueError, NotImplementedError) as exc:
@@ -154,8 +235,10 @@ def create_app(service: RuntimeService | None = None) -> FastAPI:
         query = MailReadQuery(provider=provider, email=email)
         service = request.app.state.runtime_service
         resolved, connector = _resolve_mail_account(service, query.provider, query.email)
+        token = _request_mail_token(request, resolved.provider, resolved.email)
         try:
-            message = await connector.get_message(resolved, message_id[:256])
+            with use_request_token(resolved.provider, resolved.email, token):
+                message = await connector.get_message(resolved, message_id[:256])
         except MailNotConnectedError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except KeyError as exc:
@@ -175,8 +258,10 @@ def create_app(service: RuntimeService | None = None) -> FastAPI:
         query = MailReadQuery(provider=provider, email=email)
         service = request.app.state.runtime_service
         resolved, connector = _resolve_mail_account(service, query.provider, query.email)
+        token = _request_mail_token(request, resolved.provider, resolved.email)
         try:
-            return await connector.get_thread(resolved, thread_id[:256])
+            with use_request_token(resolved.provider, resolved.email, token):
+                return await connector.get_thread(resolved, thread_id[:256])
         except MailNotConnectedError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except KeyError as exc:
