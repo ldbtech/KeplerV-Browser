@@ -203,14 +203,14 @@ fn application_root(app: &AppHandle) -> Result<PathBuf, String> {
     if resources.join("runtime").join("main.py").is_file() {
         return Ok(resources);
     }
-    if resources.join("runtime-bundle").join("KeplerVRuntime").is_file() {
+    if resources.join("runtime-bundle").join("KeplerVRuntime").is_dir() {
         return Ok(resources);
     }
     Err("KeplerV's local runtime files were not found. Reinstall the application or run it from the project folder.".into())
 }
 
 fn python_executable(root: &Path) -> String {
-    let packaged = root.join("runtime-bundle/KeplerVRuntime");
+    let packaged = root.join("runtime-bundle/KeplerVRuntime/KeplerVRuntime");
     if packaged.is_file() {
         return packaged.to_string_lossy().into_owned();
     }
@@ -396,7 +396,7 @@ fn start_locked(app: &AppHandle, slot: &mut Option<ManagedRuntime>) -> Result<Va
     let base_url = format!("http://127.0.0.1:{port}");
     // Uvicorn reports bind and import failures on stdout; capture both streams until health is confirmed.
     let runtime_executable = python_executable(&root);
-    let packaged_runtime = runtime_executable.ends_with("/runtime-bundle/KeplerVRuntime");
+    let packaged_runtime = runtime_executable.ends_with("/runtime-bundle/KeplerVRuntime/KeplerVRuntime");
     let mut command = Command::new(runtime_executable);
     if !packaged_runtime {
         command.args(["-m", "runtime.main"]);

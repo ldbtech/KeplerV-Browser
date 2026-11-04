@@ -12,10 +12,12 @@ if [[ -z "$build_python" || ! -x "$build_python" ]]; then
   exit 1
 fi
 
-KEPLERV_BUILD_PYTHON="$build_python" "$build_python" scripts/package-runtime.py
+env -u APPLE_SIGNING_IDENTITY KEPLERV_BUILD_PYTHON="$build_python" "$build_python" scripts/package-runtime.py
 
 if [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
   "$build_python" scripts/sign-runtime-macos.py "$APPLE_SIGNING_IDENTITY"
+  HOME="$PWD/.packaging-home" PLAYWRIGHT_BROWSERS_PATH="$PWD/src-tauri/runtime-bundle/ms-playwright" \
+    src-tauri/runtime-bundle/KeplerVRuntime/KeplerVRuntime --self-test-browser
   config_dir="$(mktemp -d /tmp/keplerv-tauri-config.XXXXXXXXXX)"
   config_file="$config_dir/tauri.conf.json"
   trap 'rm -rf "$config_dir"' EXIT

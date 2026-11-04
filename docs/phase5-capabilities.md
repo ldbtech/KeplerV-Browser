@@ -60,7 +60,7 @@ cargo test --manifest-path src-tauri/Cargo.toml   # 13 passed
 npm run build                  # svelte-check (0 errors) + vite build
 ```
 
-`runtime/tests/test_demo.py` (4 tests) binds loopback sockets and fails with
+`runtime/tests/test_demo.py` (6 tests, 5 binding loopback sockets) fails with
 `PermissionError: [Errno 1]` inside the macOS sandbox; this predates Phase 5
 and is unrelated to it. No live-model evals are part of these gates
 (`runtime.experiments.live_eval` is never run here).

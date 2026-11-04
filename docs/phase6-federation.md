@@ -32,7 +32,7 @@ and `phase6-eval.md` (eval arms, scenarios, metrics).
 | Phase 6 eval runner | Real harness, fake adapters | AIP-only vs passive-observer vs active-investigation over dev + held-out splits; all metrics measured from transcripts/verdicts/AIP/usage/latency; determinism digest; errors recorded, never invented | No live-model path; the live loopback transport requires explicit `KEPLERV_PHASE6_LIVE_EVAL=1` and is still fictional data |
 | Voice inspection | Real intents, fixture data | 5 new intent types with known-id validation (invented ids → clarification); verification/close routes are Bearer-authed; STOP_TALKING_TO navigates, never closes by voice | Answers come only from fetched session records; closing stays a human-confirmed button |
 | Session graph UI | Real rendering of fixture data | External-agent nodes with tier badges, trust-boundary divider, session edges, one session detail panel (agent/operator/session/claims/verdicts/contradictions/evidence/analysis) with simple-mode progressive disclosure | No UI redesign, no tabs/dashboards/chat panels — the existing surfaces are reused |
-| Demo end-to-end | Real test, fake world | Committed `test_phase6_demo_e2e.py`: shopping goal → discover 2 merchants → legit offer completes, unsupported branch stopped, unauthorized branch denied → Guard investigation → catalog comparison → findings → inspectable after restart | Socket-free fixtures; the 4 `test_demo.py` loopback-bind tests still need real sockets (see below) |
+| Demo end-to-end | Real test, fake world | Committed `test_phase6_demo_e2e.py`: shopping goal → discover 2 merchants → legit offer completes, unsupported branch stopped, unauthorized branch denied → Guard investigation → catalog comparison → findings → inspectable after restart | Socket-free fixtures; the 5 `test_demo.py` loopback-bind tests (of 6) still need real sockets (see below) |
 
 ## Unsupported / explicitly out of scope
 
@@ -72,10 +72,10 @@ and `phase6-eval.md` (eval arms, scenarios, metrics).
 ## Dev commands
 
 ```sh
-.venv/bin/python -m pytest runtime/tests -q --deselect runtime/tests/test_demo.py  # 236 passed, 7 skipped
+.venv/bin/python -m pytest runtime/tests -q --deselect runtime/tests/test_demo.py  # 245 passed, 6 skipped
 .venv/bin/python -m pytest runtime/tests/test_phase6_demo_e2e.py -q                # 1 passed
 .venv/bin/python -m runtime.experiments.phase6_eval runtime/experiments/results/phase6-eval  # fake eval
-npm test                       # vitest: 53 passed
+npm test                       # vitest: 56 passed
 npm run build                  # svelte-check (0 errors) + vite build
 ```
 
@@ -85,7 +85,7 @@ Optional live loopback eval (explicit opt-in; still fictional fixture data):
 KEPLERV_PHASE6_LIVE_EVAL=1 .venv/bin/python -m runtime.experiments.phase6_eval --live runtime/experiments/results/phase6-eval-live
 ```
 
-`runtime/tests/test_demo.py` (4 tests) binds loopback sockets and fails with
+`runtime/tests/test_demo.py` (6 tests, 5 binding loopback sockets) fails with
 `PermissionError: [Errno 1]` inside the macOS sandbox; this predates Phase 6
 and is unrelated to it. No live-model evals are part of these gates
 (`runtime.experiments.live_eval` is never run here).

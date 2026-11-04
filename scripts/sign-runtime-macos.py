@@ -39,6 +39,11 @@ def main() -> None:
     for alias in sorted(RUNTIME.rglob("*")):
         if not alias.is_symlink() or not alias.is_file():
             continue
+        # Preserve framework-internal aliases (for example Python.framework/Python).
+        # Turning these into duplicate regular files makes codesign treat the alias
+        # as an ambiguous nested bundle instead of signing the framework layout.
+        if any(parent.suffix == ".framework" for parent in alias.parents):
+            continue
         target = alias.resolve()
         if is_macho(target):
             alias.unlink()
@@ -56,7 +61,8 @@ def main() -> None:
         raise SystemExit(f"No Mach-O binaries found under {RUNTIME}")
 
     for binary in binaries:
-        entitlements = CHROMIUM_ENTITLEMENTS if binary.name in {"chrome-headless-shell", "Chromium", "Google Chrome for Testing"} else None
+        needs_jit = binary.name in {"chrome-headless-shell", "Chromium", "Google Chrome for Testing", "node"}
+        entitlements = CHROMIUM_ENTITLEMENTS if needs_jit else None
         print(f"Developer ID signing runtime binary: {binary.relative_to(RUNTIME)}", flush=True)
         sign(binary, identity, entitlements)
 

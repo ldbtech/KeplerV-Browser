@@ -149,7 +149,13 @@ Run the desktop app with the synthetic demo environment using:
 KEPLERV_DEMO_MODE=1 npm run desktop
 ```
 
-Then open any goal and use the "Use fictional demo fixtures" button to point research at the university catalog. Fixture pages are fictional, labeled, and unreachable outside demo mode.
+Then find the runtime sidecar's loopback port (it is chosen randomly at launch):
+
+```sh
+lsof -iTCP -sTCP:LISTEN -P -n | grep 127.0.0.1
+```
+
+Open any goal, paste `http://127.0.0.1:<port>/demo/university/catalog` into the START PAGE field, and start research. Fixture pages are fictional and labeled; AIP only permits the agent to visit `/demo/` URLs while `KEPLERV_DEMO_MODE=1` is set. Demo browsing still uses your connected model for reasoning — only the pages are fixtures.
 
 ## What is operational and what remains simulated
 
@@ -170,7 +176,7 @@ Then open any goal and use the "Use fictional demo fixtures" button to point res
 | Offline workspace | Explicitly selectable from the goal panel when no model is connected; goals, tasks, and local helpers stay available while research stays gated and nothing is presented as live |
 | Voice transcription | Real 16kHz microphone capture with energy endpointing, transcribed by Meta `muse-voice-transcribe-1.0`; example transcripts remain only as an explicit fallback when recording or transcription is unavailable |
 | Speech output | Real system-native speech synthesis with interrupt-to-listen, announcements for approvals, Guard cases, and completions, plus a settings toggle; presence shows listening, processing, and speaking states |
-| Intent interpreter | Muse classifies 15 spoken operations with validated target IDs from live workspace context; unknown references and ambiguity return clarification questions, never guesses |
+| Intent interpreter | Muse classifies 34 spoken operations with validated target IDs from live workspace context; unknown references and ambiguity return clarification questions, never guesses |
 | Voice approvals | Spoken requests open the exact pending approval and read its details; confirmation stays a deliberate button action in the goal panel and AIP makes the final decision |
 | Synthetic demo environment | Fictional KeplerV University fixtures served from loopback; AIP exemption is path-scoped to `/demo/`, requires explicit `KEPLERV_DEMO_MODE=1`, and keeps capability and approval checks |
 | Tracing and replay | `GET /runs/{id}/trace` exports events, evidence, cases, and stage latencies; `runtime.experiments.replay` verifies and plays traces back labeled REPLAY without model calls |
@@ -183,7 +189,7 @@ Then open any goal and use the "Use fictional demo fixtures" button to point res
 | Service accounts (OAuth) | Real PKCE flow (S256, state/nonce, loopback callback, refresh, revoke) with keychain token storage under `oauth:{provider}:{account}`; public client IDs only via `KEPLERV_OAUTH_CLIENT_ID_*` or `oauth-client-ids.json`; no IDs ship so live sign-in is unexercised; Python holds metadata only, never tokens |
 | Email read | Fake-mail fixture (3 fictional messages, every payload FAKE-labeled) served over token-authed `/mail/*` routes; Gmail client is real but fails closed as not-connected (keychain tokens not bridged to Python); Outlook is a labeled skeleton; ambiguous references return candidates, never auto-pick |
 | Email send | Fake-mail outbox only, after AIP grant plus explicit approval; voice can only request approval; real-provider send fails loudly with "Nothing was sent" — no live send path by design |
-| Service permissions | 13 service tools gated on exact per-agent/per-goal grants with immediate revoke, approval for sensitive ops, `service.access_denied` events, and high-severity Guard cases; unauthorized sends are denied with an empty outbox (Scenario C) |
+| Service permissions | 18 service tools (13 Phase 5 + 5 gateway) gated on exact per-agent/per-goal grants with immediate revoke, approval for sensitive ops, `service.access_denied` events, and high-severity Guard cases; unauthorized sends are denied with an empty outbox (Scenario C) |
 | Trust Gateway | Real exclusive cross-boundary path: SSRF-checked endpoints, strict envelopes, correlation, budgets, rate limits, sqlite transcripts; loopback fixtures only via explicit allowlist |
 | Synthetic merchants | Fake labeled fixtures (cooperative/competitive/misleading/adversarial) over the fictional KeplerV Bazaar; fictional credits, no real purchases |
 | Negotiation + verification | Real multi-round gateway flows with frozen goals, threat redaction, credential refusal, and 4-level claim verdicts against a SHA-256-manifested trusted catalog; local policy is a deterministic fake |

@@ -360,6 +360,15 @@ button,select,input,textarea { min-height:44px; }
   .audio-content { column-gap: 0; }
   .audio-particle-field { width: 50vw; }
 }
+@media (max-height: 940px) {
+  .audio-content { padding-top: 14px; padding-bottom: 14px; }
+  .audio-particle-field { height: min(44vh,420px); min-height: 240px; }
+  .audio-copy h2 { font-size: clamp(30px,3.4vw,44px); }
+  .audio-meter { height: 34px; }
+  .audio-controls { margin-top: 12px; }
+  .audio-result p { font-size: 17px; }
+  .audio-result { padding: 8px 15px; }
+}
 @media (max-width: 700px) {
   .topbar { height: 58px; padding-inline: 15px; }
   .top-context { gap: 6px; font-size: 8px; }

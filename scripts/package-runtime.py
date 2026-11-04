@@ -42,7 +42,7 @@ def main() -> None:
     pyinstaller_env = os.environ.copy()
     pyinstaller_env["PYINSTALLER_CONFIG_DIR"] = str(PYINSTALLER_CONFIG)
     pyinstaller_args = [
-        str(python), "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile",
+        str(python), "-m", "PyInstaller", "--noconfirm", "--clean",
         "--name", "KeplerVRuntime", "--distpath", str(OUTPUT), "--workpath", str(WORK),
         "--specpath", str(WORK), "--collect-all", "runtime", "--collect-all", "playwright",
         "--hidden-import", "runtime.api", "scripts/runtime_entry.py",
@@ -60,7 +60,7 @@ def main() -> None:
     if not BROWSER_DIST.exists():
         run([str(python), "-m", "playwright", "install", "chromium", "--only-shell"], env=browser_env)
     shutil.copytree(BROWSER_DIST, OUTPUT / "ms-playwright")
-    expected = OUTPUT / "KeplerVRuntime"
+    expected = DIST / "KeplerVRuntime"
     if not expected.is_file():
         raise SystemExit(f"PyInstaller did not create the runtime executable: {expected}")
     if not (OUTPUT / "ms-playwright").is_dir():
