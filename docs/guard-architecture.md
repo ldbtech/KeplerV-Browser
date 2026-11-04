@@ -83,8 +83,30 @@ route through `RuntimeService` controls, and record hash-chained evidence with
   denies later browser tools until restored.
 - `request_human_review` — routes an investigating case to the user.
 
-Automatic emergency rules are not implemented; AIP already blocks prohibited
-actions before execution.
+Policy-gated automatic containment (`auto_containment.py`,
+`containment.apply_auto`) reuses the same trusted controls for high-risk
+signals only (behavioral classes `injection` / `unauthorized-request` /
+`policy-violation`, or high-severity cases). The local user picks one
+explicit mode — `off`, `pause-only` (default), or `full` — via
+`POST /guard/auto-containment` (env `KEPLERV_GUARD_AUTO_CONTAINMENT`
+otherwise). `pause-only` automatically applies `pause_agent` /
+`deny_pending`; `isolate_browser` / `revoke_capability` still need
+explicit approval unless `full` mode is set. Every automatic action
+records hash-chained evidence with a policy authorization (never a user
+action) and emits a user-visible `guard.auto_containment` audit event,
+so the user can keep, adjust, or override it (e.g. `resume_agent` /
+`restore_browser`). Routine AIP denials never auto-trigger; AIP already
+blocks prohibited actions before execution.
+
+## Behavioral classification
+
+External-agent exchanges are labeled with one of eight behavior classes
+by deterministic observable-only rules (`behavior_classification.py`,
+label `fake-rules-v1`) as the offline baseline. A model-powered
+classifier (`model_classification.py`) offers the same classes through
+the provider interface: fake-adapter results carry `fake-model-v1`, and
+the live Muse path is env-gated (`KEPLERV_GUARD_MODEL_CLASSIFIER=1`)
+and labeled `live-muse-v1`.
 
 ## Native integration
 
@@ -115,7 +137,6 @@ it only creates goals and cannot bypass AIP approval.
 
 ## What remains mock or future
 
-- Automatic emergency containment rules.
 - Model-driven multi-turn Guard tool use (roles currently retrieve one
   bounded bundle per pass and persist through validated tools).
 - Audio Q&A over case records.

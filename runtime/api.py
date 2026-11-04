@@ -14,7 +14,7 @@ from runtime.models import (
     MailTokenPush,
     RunRequest,
 )
-from runtime.guard.schemas import GuardContainmentRequest, GuardTransitionRequest
+from runtime.guard.schemas import AutoContainmentModeRequest, GuardContainmentRequest, GuardTransitionRequest
 from runtime.guard.evidence import GuardEvidenceService
 from runtime.guard.detective import GuardInvestigationError
 from runtime.guard.interrogation import GuardInterviewError
@@ -104,6 +104,31 @@ def create_app(service: RuntimeService | None = None) -> FastAPI:
     @app.get("/snapshot")
     async def snapshot(request: Request, after: int = Query(default=0, ge=0), _: None = Depends(authenticated)):
         return request.app.state.runtime_service.snapshot(after)
+
+    @app.post("/privacy/runtime-history/reset")
+    async def reset_runtime_history(request: Request, _: None = Depends(authenticated)):
+        """Delete all local research, Guard, and A2A history; keep keychain credentials."""
+        await request.app.state.runtime_service.clear_local_history()
+        return {"deleted": True, "scope": ["research", "citations", "Guard cases", "agent conversations"]}
+
+    @app.post("/goals/{goal_id}/delete")
+    async def delete_goal(goal_id: str, request: Request, _: None = Depends(authenticated)):
+        """Stop one goal's runs and delete all its local records; keep keychain credentials."""
+        try:
+            return await request.app.state.runtime_service.delete_goal(goal_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/privacy/browser-data/clear")
+    async def clear_browser_data(request: Request, _: None = Depends(authenticated)):
+        """Clear agent-browser data (cookies, screenshots, cached page state).
+
+        Research history, evidence, and Guard records are untouched; live
+        browser contexts stay open so runs keep working.
+        """
+        return await request.app.state.runtime_service.clear_browser_data()
 
     def _resolve_mail_account(service: RuntimeService, provider: str | None, email: str | None):
         registry = service._services()
@@ -384,6 +409,17 @@ def create_app(service: RuntimeService | None = None) -> FastAPI:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/guard/auto-containment")
+    async def get_auto_containment(request: Request, _: None = Depends(authenticated)):
+        from runtime.guard.auto_containment import AUTO_MODES, DEFAULT_AUTO_MODE
+        return {"mode": request.app.state.runtime_service.guard_auto_containment_mode,
+                "modes": list(AUTO_MODES), "default": DEFAULT_AUTO_MODE}
+
+    @app.post("/guard/auto-containment")
+    async def set_auto_containment(body: AutoContainmentModeRequest, request: Request, _: None = Depends(authenticated)):
+        request.app.state.runtime_service.guard_auto_containment_mode = body.mode
+        return {"mode": request.app.state.runtime_service.guard_auto_containment_mode}
 
     @app.get("/runs/{run_id}")
     async def get_run(run_id: str, request: Request, _: None = Depends(authenticated)):

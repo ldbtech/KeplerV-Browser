@@ -34,8 +34,10 @@ class RunRequest(StrictModel):
     goal_description: str = Field(min_length=1, max_length=8000)
     task: str = Field(default="Search the public web for relevant sources and summarize three source-backed findings.", min_length=1, max_length=2000)
     source_url: HttpUrl | None = None
-    step_budget: int = Field(default=16, ge=1, le=24)
-    token_budget: int = Field(default=50000, ge=1000, le=50000)
+    step_budget: int = Field(default=24, ge=1, le=24)
+    # Zero disables the run-wide token ceiling. SQLite stores finite ceilings
+    # as signed 64-bit integers; this is far above any practical user setting.
+    token_budget: int = Field(default=50000, ge=0, le=9_223_372_036_854_775_807)
     allow_external_agents: bool = False
 
     @field_validator("source_url")

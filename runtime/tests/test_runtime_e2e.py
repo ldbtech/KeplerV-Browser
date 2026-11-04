@@ -122,6 +122,17 @@ class BudgetRegistry(FakeRegistry):
     def __init__(self): self.adapter = BudgetModel()
 
 
+class HighUsageModel(FakeModel):
+    async def generate(self, model, messages, tools):
+        decision = await super().generate(model, messages, tools)
+        decision.usage = {"total_tokens": 60000}
+        return decision
+
+
+class HighUsageRegistry(FakeRegistry):
+    def __init__(self): self.adapter = HighUsageModel()
+
+
 class ApprovalModel:
     def __init__(self): self.turn = 0
     async def generate(self, model, messages, tools):
@@ -292,6 +303,24 @@ async def test_token_budget_stops_run_after_cost_is_reported(tmp_path):
     assert run["status"] == "failed"
     assert run["tokens_used"] == 1200
     assert "token budget" in run["error"]
+
+
+@pytest.mark.asyncio
+async def test_unlimited_token_budget_completes_past_50000_tokens(tmp_path):
+    request = RunRequest(
+        goal_id="goal-unlimited", goal_title="Unlimited budget test",
+        goal_description="Confirm the optional token ceiling can be disabled.",
+        source_url="https://docs.python.org/3/library/asyncio.html", token_budget=0,
+    )
+    assert RunRequest.model_validate({**request.model_dump(), "token_budget": 100000}).token_budget == 100000
+    service = RuntimeService(RuntimeStore(tmp_path / "unlimited.sqlite3"), HighUsageRegistry(), FakeBrowser,
+                             public_host_check=lambda _: True)
+    agent = await service.create_run(request)
+    await service._tasks[agent["id"]]
+    run = service.store.get_run(agent["id"])
+    assert run["status"] == "completed"
+    assert run["token_budget"] == 0
+    assert run["tokens_used"] > 50000
 
 
 @pytest.mark.asyncio

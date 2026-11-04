@@ -700,7 +700,7 @@ pub fn credential_status(app: AppHandle, window: WebviewWindow) -> Result<Value,
     let sharing = profile.as_ref().is_some_and(|p| p.scopes.iter().any(|s| s == "chatgpt.tokens.use.direct"));
     let active_provider = config.as_ref().map(|c| c.provider.as_str()).unwrap_or("meta");
     let active_configured = active_provider.starts_with("local-") || active_provider == "chatgpt" && sharing || model_key(active_provider).is_some();
-    Ok(json!({"connected":connected, "active_provider":active_provider, "active_model":config.as_ref().map(|c| c.model.as_str()).unwrap_or("muse-spark-1.3"), "meta_configured":active_configured, "meta_credential_saved":saved_secret("meta").is_some(), "chatgpt_connected":profile.is_some(), "chatgpt_email":profile.and_then(|p| p.email), "chatgpt_sharing":sharing}))
+    Ok(json!({"connected":connected, "active_provider":active_provider, "active_model":config.as_ref().map(|c| c.model.as_str()).unwrap_or("muse-spark-1.3"), "active_endpoint":config.as_ref().map(|c| c.endpoint.as_str()).unwrap_or("https://api.meta.ai/v1"), "meta_configured":active_configured, "meta_credential_saved":saved_secret("meta").is_some(), "chatgpt_connected":profile.is_some(), "chatgpt_email":profile.and_then(|p| p.email), "chatgpt_sharing":sharing}))
 }
 
 #[tauri::command]
@@ -749,7 +749,7 @@ pub fn provider_connect(app: AppHandle, window: WebviewWindow, state: State<'_, 
     let mut slot = state.runtime.lock().map_err(|_| "Runtime state is unavailable.".to_string())?;
     stop_runtime(&mut slot);
     let runtime = start_locked(&app, &mut slot)?;
-    Ok(json!({"connected":true,"provider":provider,"model":config.model,"runtime":runtime}))
+    Ok(json!({"connected":true,"provider":provider,"model":config.model,"endpoint":config.endpoint,"runtime":runtime}))
 }
 
 #[tauri::command]
@@ -776,7 +776,7 @@ pub fn provider_activate(app: AppHandle, window: WebviewWindow, state: State<'_,
     let mut slot = state.runtime.lock().map_err(|_| "Runtime state is unavailable.".to_string())?;
     stop_runtime(&mut slot);
     let runtime = start_locked(&app, &mut slot)?;
-    Ok(json!({"provider":provider,"model":config.model,"runtime":runtime}))
+    Ok(json!({"provider":provider,"model":config.model,"endpoint":config.endpoint,"runtime":runtime}))
 }
 
 #[tauri::command]
@@ -840,6 +840,9 @@ pub async fn credential_chatgpt_connect(app: AppHandle, window: WebviewWindow, s
     if let Some(auth_window) = app.get_webview_window("chatgpt-auth") { let _ = auth_window.close(); }
     let _ = window.set_focus();
     let mut result = worker_result.map_err(|_| "The ChatGPT sign-in worker stopped unexpectedly.".to_string())??;
+    if let (Some(config), Some(object)) = (read_model_config(&app), result.as_object_mut()) {
+        object.insert("active_endpoint".into(), Value::String(config.endpoint));
+    }
     let runtime = match state.runtime.lock() {
         Ok(mut slot) => {
             stop_runtime(&mut slot);
@@ -1121,7 +1124,7 @@ pub fn runtime_create_run(
     goal_description: String,
     task: String,
     source_url: Option<String>,
-    token_budget: u32,
+    token_budget: u64,
     allow_external_agents: bool,
 ) -> Result<Value, String> {
     ensure_main_window(&window)?;
@@ -1140,7 +1143,7 @@ pub fn runtime_create_run(
         "/runs",
         json!({
             "goal_id":goal_id,"goal_title":goal_title,"goal_description":goal_description,
-            "task":task,"source_url":source_url,"step_budget":16,"token_budget":token_budget,
+            "task":task,"source_url":source_url,"step_budget":24,"token_budget":token_budget,
             "allow_external_agents":allow_external_agents
         }),
     )
@@ -1374,6 +1377,97 @@ pub fn runtime_guard_containment(
         &format!("/guard/cases/{case_id}/containment"),
         json!({"action":action,"reason":reason,"capability":capability}),
     )
+}
+
+#[tauri::command]
+pub fn runtime_guard_auto_containment(
+    window: WebviewWindow,
+    state: State<'_, RuntimeBridge>,
+) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    let (base_url, token) = {
+        let slot = state.runtime.lock().map_err(|_| "Runtime state is unavailable.".to_string())?;
+        let runtime = slot.as_ref().ok_or_else(|| "Runtime is not running.".to_string())?;
+        (runtime.base_url.clone(), runtime.token.clone())
+    };
+    let client = authorized_client()?;
+    authenticated_get(&client, &base_url, &token, "/guard/auto-containment")
+}
+
+#[tauri::command]
+pub fn runtime_guard_auto_containment_set(
+    window: WebviewWindow,
+    state: State<'_, RuntimeBridge>,
+    mode: String,
+) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    let mode = mode.trim();
+    if mode.is_empty() || mode.len() > 32 {
+        return Err("Auto-containment mode was empty or too long.".into());
+    }
+    let (base_url, token) = {
+        let slot = state.runtime.lock().map_err(|_| "Runtime state is unavailable.".to_string())?;
+        let runtime = slot.as_ref().ok_or_else(|| "Runtime is not running.".to_string())?;
+        (runtime.base_url.clone(), runtime.token.clone())
+    };
+    let client = authorized_client()?;
+    authenticated_post(
+        &client,
+        &base_url,
+        &token,
+        "/guard/auto-containment",
+        json!({"mode": mode}),
+    )
+}
+
+#[tauri::command]
+pub fn runtime_clear_history(
+    window: WebviewWindow,
+    state: State<'_, RuntimeBridge>,
+) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    let (base_url, token) = {
+        let slot = state.runtime.lock().map_err(|_| "Runtime state is unavailable.".to_string())?;
+        let runtime = slot.as_ref().ok_or_else(|| "Runtime is not running.".to_string())?;
+        (runtime.base_url.clone(), runtime.token.clone())
+    };
+    let client = authorized_client()?;
+    authenticated_post(&client, &base_url, &token, "/privacy/runtime-history/reset", json!({}))
+}
+
+#[tauri::command]
+pub fn runtime_delete_goal(
+    window: WebviewWindow,
+    state: State<'_, RuntimeBridge>,
+    goal_id: String,
+) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    if goal_id.trim().is_empty() || goal_id.len() > 200 {
+        return Err("Enter a valid goal id.".to_string());
+    }
+    let (base_url, token) = {
+        let slot = state.runtime.lock().map_err(|_| "Runtime state is unavailable.".to_string())?;
+        let runtime = slot.as_ref().ok_or_else(|| "Runtime is not running.".to_string())?;
+        (runtime.base_url.clone(), runtime.token.clone())
+    };
+    let client = authorized_client()?;
+    let path = format!("/goals/{}/delete", goal_id.trim());
+    authenticated_post(&client, &base_url, &token, &path, json!({}))
+}
+
+#[tauri::command]
+pub fn runtime_clear_browser_data(
+    window: WebviewWindow,
+    state: State<'_, RuntimeBridge>,
+) -> Result<Value, String> {
+    ensure_main_window(&window)?;
+    let (base_url, token) = {
+        let slot = state.runtime.lock().map_err(|_| "Runtime state is unavailable.".to_string())?;
+        let runtime = slot.as_ref().ok_or_else(|| "Runtime is not running.".to_string())?;
+        (runtime.base_url.clone(), runtime.token.clone())
+    };
+    let client = authorized_client()?;
+    authenticated_post(&client, &base_url, &token, "/privacy/browser-data/clear", json!({}))
 }
 
 #[tauri::command]

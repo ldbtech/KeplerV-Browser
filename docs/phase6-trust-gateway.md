@@ -19,9 +19,14 @@ file/image parts are not supported by this adapter yet.
 
 Inbound A2A text is screened in the background for observable prompt-override,
 credential-request, coercion, and redirect markers. A match adds evidence to
-the session's Guard case. The deterministic screen is a narrow heuristic; it
-does not guarantee detection of novel attacks or make claims about an agent's
-intent.
+the session's Guard case. The deterministic screen (`fake-rules-v1`) is a
+narrow heuristic; it does not guarantee detection of novel attacks or make
+claims about an agent's intent. A model-powered classifier
+(`runtime/guard/model_classification.py`, labeled `fake-model-v1` on fake
+adapters and `live-muse-v1` on the `MODEL_API_KEY` +
+`KEPLERV_GUARD_MODEL_CLASSIFIER=1` env-gated live path) classifies the same
+behavior classes through the provider interface; the deterministic rules
+remain the offline baseline.
 
 ## Trust tiers
 
@@ -78,9 +83,9 @@ itself:
 
 The trusted catalog (`runtime/merchants/trusted_catalog.py`) is the
 canonical authority: fictional products with a SHA-256 manifest and
-fixture-only HMAC attestations (stdlib `hmac`/`hashlib` — established
-primitives, no custom crypto; the key is hard-coded test-only material
-that never touches the keychain).
+Ed25519 attestations (`cryptography` package — established primitives,
+no custom crypto; the signing key is an in-memory process key with
+rotation support, never the keychain).
 
 ## Fake / live / replay labeling
 

@@ -58,7 +58,7 @@ def _valid_result_url(url: str) -> bool:
         return False
 
 
-async def search_public_web(query: str, limit: int = 3) -> list[dict[str, str]]:
+async def search_public_web(query: str, limit: int = 10) -> list[dict[str, str]]:
     """Return bounded public search results from a fixed, credential-free endpoint."""
     clean_query = " ".join(query.split())
     if not 2 <= len(clean_query) <= 500:
@@ -78,6 +78,6 @@ async def search_public_web(query: str, limit: int = 3) -> list[dict[str, str]]:
             continue
         seen.add(url)
         safe.append({"url": url, "title": result["title"][:300], "snippet": result["snippet"][:1000]})
-        if len(safe) >= max(1, min(limit, 3)):
+        if len(safe) >= max(1, min(limit, 10)):
             break
     return safe

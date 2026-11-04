@@ -23,12 +23,13 @@ and `phase6-eval.md` (eval arms, scenarios, metrics).
 | SSRF protection | Real | `https` only (except allowlisted loopback fixtures); every resolved DNS IP must be acceptable; localhost/private/link-local/cloud-metadata ranges denied; no credentials in URLs; discovery refuses cross-host redirect hops | Allowlist is the explicit escape hatch for fixtures — anything else stays blocked |
 | Merchant fixtures | Developer tests only | 4 deterministic profiles (cooperative / competitive / misleading / adversarial) over fictional catalog data, served via loopback HTTP or socket-free mock transports with identical handlers | Synthetic by design; not offered as real internet agents and not used by the public A2A UI |
 | Negotiation driver | Real logic over fake merchants | Multi-round quote/order flows through the gateway with full transcripts + claim verdicts; frozen goals with per-round drift checks; inbound threat scan + policy-view redaction; credential-request refusal; never fetches inbound URLs | Local policy is the deterministic fake policy (`FAKE` label); no live model negotiates |
-| Claim verification | Real checks, fixture authority | 4 verdicts (`cryptographically-attested` / `independently-observed` / `statement-made` / `unverified`); trusted catalog with SHA-256 manifest; evidence refs are caller-supplied only | Catalog authority is fictional fixture data; attestations are fixture-only HMAC (see below) |
+| Claim verification | Real checks, fixture authority | 4 verdicts (`cryptographically-attested` / `independently-observed` / `statement-made` / `unverified`); trusted catalog with SHA-256 manifest; evidence refs are caller-supplied only | Catalog authority is fictional fixture data; attestations are Ed25519 with an in-memory process key (production must use the keychain `federation-identity` namespace) |
 | AIP gateway matrix | Real enforcement | `gateway.discover`/`close_session` grant-only; `open_session`/`send`/`verify` require grant + explicit approval; denials emit `aip.decision` + `service.access_denied` and open Guard cases | Scheduler dispatch only; no new HTTP grant/revoke routes |
 | Data minimization | Real enforcement | Secret/account/session-bearing outbound fields refuse the whole send, naming fields only (never values); refused sends issue zero gateway POSTs and zero session usage | Field-name matching (compound-key parts); oversized payloads refused by the byte cap |
-| Federated AIP statements | Experimental prototype | HMAC-SHA256 signed statements verify at operator level; tampered/unknown/revoked keys rejected as unverified-signature; delegation/receipt proof levels only with valid covering credentials; signed-is-not-true is tested | Symmetric HMAC only (stdlib `hmac`/`hashlib`, no custom crypto) — production use requires asymmetric signatures with KMS-held keys; fixture keys never touch the keychain |
-| Guard behavioral classification | Experimental rules | A2A inbound replies are screened in the background for observable instruction overrides, credential requests, coercion, and redirect markers; flags are attached to the session's Guard case and transcript; firm bargaining is not itself suspicious | Fixed deterministic rules labeled `fake-rules-v1`, not a live-model judgment; no intent claims and no guarantee of detecting novel attacks |
-| Guard external investigation | Experimental rules | Pure analysis (no gateway handle, so no I/O): sanitized Detective transcripts, catalog+ledger contradiction detection, verdicts, classification, gateway-bound follow-ups, abstention on thin evidence; contradictions open `external_contradiction` cases | Same `fake-rules-v1` caveat; follow-ups are data the local agent must issue via `gateway.send` |
+| Federated AIP statements | Experimental prototype | Ed25519 signed statements verify at operator level; tampered/unknown/revoked keys rejected as unverified-signature; delegation/receipt proof levels only with valid covering credentials; signed-is-not-true is tested; key rotation keeps pre-rotation envelopes verifiable | `cryptography`-package Ed25519, no custom crypto — production keys must live in the keychain `federation-identity:{operator}:{key}` namespace (test-only file fallback via `KEPLERV_FEDERATION_KEYSTORE_DIR`) |
+| Guard behavioral classification | Rules baseline + model classifier | Deterministic rules stay as the offline baseline; a model-powered classifier (`runtime/guard/model_classification.py`) classifies the 8 behavior classes through the provider interface over a sanitized transcript with schema-validated JSON. Fake-adapter results are labeled `fake-model-v1`; the live Muse path requires `MODEL_API_KEY` + `KEPLERV_GUARD_MODEL_CLASSIFIER=1` and is labeled `live-muse-v1`. The session panel shows the backend classifier label with a FAKE/LIVE badge | Committed tests use fake adapters only; live classification needs the user's `MODEL_API_KEY`; no intent claims and no guarantee of detecting novel attacks |
+| Guard external investigation | Experimental rules | Pure analysis (no gateway handle, so no I/O): sanitized Detective transcripts, catalog+ledger contradiction detection, verdicts, classification, gateway-bound follow-ups, abstention on thin evidence; contradictions open `external_contradiction` cases | Baseline labels still apply; follow-ups are data the local agent must issue via `gateway.send` |
+| Guard auto-containment | Real, triggered end to end | Policy-gated auto-containment (`runtime/guard/auto_containment.py`, modes off / pause-only default / full) reuses the trusted pause/deny/isolate/revoke controls, records policy (never user) authorization as hash-chained evidence, and emits a user-visible `guard.auto_containment` audit event per action; mode is set via constructor/attribute/env or authed `GET/POST /guard/auto-containment`, and the Safety panel renders mode + automatic-action notices with Undo/Review | High-risk flagged external replies (`injection`, `unauthorized-request`, `policy-violation`) trigger automatically after `gateway.send`; routine AIP denials never auto-trigger; isolate/revoke need approval unless mode is full; human override via existing resume/restore |
 | Phase 6 eval runner | Real harness, fake adapters | AIP-only vs passive-observer vs active-investigation over dev + held-out splits; all metrics measured from transcripts/verdicts/AIP/usage/latency; determinism digest; errors recorded, never invented | No live-model path; the live loopback transport requires explicit `KEPLERV_PHASE6_LIVE_EVAL=1` and is still fictional data |
 | Voice inspection | Real intents, fixture data | 5 new intent types with known-id validation (invented ids → clarification); verification/close routes are Bearer-authed; STOP_TALKING_TO navigates, never closes by voice | Answers come only from fetched session records; closing stays a human-confirmed button |
 | Session graph UI | Real rendering of fixture data | External-agent nodes with tier badges, trust-boundary divider, session edges, one session detail panel (agent/operator/session/claims/verdicts/contradictions/evidence/analysis) with simple-mode progressive disclosure | No UI redesign, no tabs/dashboards/chat panels — the existing surfaces are reused |
@@ -39,10 +40,12 @@ and `phase6-eval.md` (eval arms, scenarios, metrics).
 - Live-model negotiation or live-model eval runs by default — fake adapters
   only; the live loopback runner is explicit opt-in and labeled.
 - Real purchases, real currency, real merchants — the marketplace is fictional.
-- Asymmetric federated credentials / KMS integration — the HMAC prototype
-  must be replaced before any production use.
-- Automatic Guard containment for gateway anomalies — cases open for human
-  review; emergency auto-rules remain unimplemented.
+- Keychain-backed federated credentials — Ed25519 is real but the
+  Python sidecar holds memory-only handles; the Tauri layer must persist
+  seeds under `federation-identity:{operator}:{key}` before production use.
+- Automatic triggering of Guard containment for routine denials —
+  high-risk flagged external replies trigger automatically, while routine
+  denials only open cases for human review, by design.
 - Keychain `MODEL_API_KEY` access from the gateway path — never touched or
   printed; fixture tokens are explicit per-call values.
 - Docker, non-loopback binds, custom crypto — not used anywhere in Phase 6.
@@ -72,11 +75,19 @@ and `phase6-eval.md` (eval arms, scenarios, metrics).
 ## Dev commands
 
 ```sh
-.venv/bin/python -m pytest runtime/tests -q --deselect runtime/tests/test_demo.py  # 245 passed, 6 skipped
+.venv/bin/python -m pytest runtime/tests -q    # 319 passed, 8 skipped (run outside the macOS sandbox for loopback-bind tests)
 .venv/bin/python -m pytest runtime/tests/test_phase6_demo_e2e.py -q                # 1 passed
 .venv/bin/python -m runtime.experiments.phase6_eval runtime/experiments/results/phase6-eval  # fake eval
-npm test                       # vitest: 56 passed
-npm run build                  # svelte-check (0 errors) + vite build
+npm test                       # vitest: 95 passed
+npm run build                  # svelte-check (0 errors, 0 warnings) + vite build
+cargo test --manifest-path src-tauri/Cargo.toml   # 23 passed
+```
+
+Guard/federation-focused subsets (fake adapters only, no live-model calls):
+
+```sh
+.venv/bin/python -m pytest runtime/tests/test_federation_ed25519.py runtime/tests/test_phase6_investigation.py runtime/tests/test_phase6_negotiation.py -q
+.venv/bin/python -m pytest runtime/tests/test_guard_auto_containment.py runtime/tests/test_guard_model_classifier.py -q
 ```
 
 Optional live loopback eval (explicit opt-in; still fictional fixture data):
@@ -85,10 +96,25 @@ Optional live loopback eval (explicit opt-in; still fictional fixture data):
 KEPLERV_PHASE6_LIVE_EVAL=1 .venv/bin/python -m runtime.experiments.phase6_eval --live runtime/experiments/results/phase6-eval-live
 ```
 
-`runtime/tests/test_demo.py` (6 tests, 5 binding loopback sockets) fails with
-`PermissionError: [Errno 1]` inside the macOS sandbox; this predates Phase 6
-and is unrelated to it. No live-model evals are part of these gates
+No live-model evals are part of these gates
 (`runtime.experiments.live_eval` is never run here).
+
+## Judge verification (no secrets needed)
+
+```sh
+cd /Users/alidaho/Projects/keplerv/browser
+.venv/bin/python -m pytest runtime/tests -q
+npm test
+cargo test --manifest-path src-tauri/Cargo.toml
+npm run build
+```
+
+Expected: pytest 319 passed / 8 skipped, vitest 95 passed, cargo 23
+passed, svelte-check 0 errors / 0 warnings. Live Guard classification
+additionally needs `MODEL_API_KEY` + `KEPLERV_GUARD_MODEL_CLASSIFIER=1`
+(env-gated, labeled `live-muse-v1`); without them the deterministic
+`fake-rules-v1` baseline and `fake-model-v1` adapters apply. Committed
+tests make no live-model calls.
 
 ## Module map
 
@@ -98,7 +124,11 @@ and is unrelated to it. No live-model evals are part of these gates
   trusted catalogs
 - `runtime/negotiation/` — multi-round driver + deterministic fake policy
 - `runtime/verification/` — claim verdict service
-- `runtime/federation/`, `runtime/aip/federated.py` — signed-statement prototype
+- `runtime/federation/`, `runtime/aip/federated.py` — Ed25519 signed statements
+  (`keys.py`: keygen/sign/verify, keystore, rotation; `cryptography==50.0.2`)
+- `runtime/guard/model_classification.py`,
+  `runtime/guard/auto_containment.py` — model classifier (fake default,
+  live env-gated) + policy-gated auto-containment
 - `runtime/guard/behavior_classification.py`,
   `runtime/guard/external_investigation.py` — classification + investigation
 - `runtime/experiments/phase6_eval.py` — three-arm eval runner

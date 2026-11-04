@@ -68,6 +68,10 @@ KEPLERV_PHASE6_LIVE_EVAL=1 .venv/bin/python -m runtime.experiments.phase6_eval -
 
 Without the flag, the live path raises instead of silently substituting.
 
+The eval arms use the deterministic classification baseline only; the
+model-powered Guard classifier (`fake-model-v1` / env-gated `live-muse-v1`)
+and policy-gated auto-containment are not in the eval loop.
+
 ## How to read the outputs
 
 `phase6-evaluation.md` has the arm × split summary table (dev / held_out /

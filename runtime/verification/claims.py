@@ -8,7 +8,8 @@ service ran itself, attestation blobs presented for verification).
 Verdicts:
 
 - ``cryptographically-attested`` — a presented attestation verifies over
-  the exact claim (fixture HMAC in tests; established primitives only).
+  the exact claim (Ed25519 via the ``cryptography`` package; established
+  primitives only).
 - ``independently-observed`` — the claim matches the trusted catalog or
   another caller-supplied independent source.
 - ``statement-made`` — the merchant said it (transcript statement ref) but
@@ -91,7 +92,7 @@ def verify_price_claim(
                 evidence_refs=refs, asserted_by=asserted_by,
             )
         if trusted_catalog.verify_attestation(canonical, attestation):
-            refs.append("attestation:verified(hmac-sha256-fixture-v1)")
+            refs.append(f"attestation:verified({trusted_catalog.ATTESTATION_ALGORITHM})")
             return _verdict(
                 claim=claim, verdict="cryptographically-attested",
                 reason="The presented attestation verifies over the exact asserted price.",
@@ -154,7 +155,7 @@ def verify_text_claim(
     if attestation is not None:
         canonical = trusted_catalog.canonical_text_claim(product_id, text)
         if trusted_catalog.verify_attestation(canonical, attestation):
-            refs.append("attestation:verified(hmac-sha256-fixture-v1)")
+            refs.append(f"attestation:verified({trusted_catalog.ATTESTATION_ALGORITHM})")
             return _verdict(
                 claim=claim, verdict="cryptographically-attested",
                 reason="The presented attestation verifies over the exact asserted text.",

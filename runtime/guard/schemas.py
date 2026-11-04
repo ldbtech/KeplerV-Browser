@@ -134,3 +134,19 @@ class ObserverScreening(BaseModel):
     evidence_ids: list[str] = Field(min_length=1, max_length=8)
     rationale: str = Field(min_length=8, max_length=1000)
     uncertainties: list[str] = Field(default_factory=list, max_length=8)
+
+
+class ModelBehaviorClassification(BaseModel):
+    """Model-powered behavioral label; same classes as the rules baseline."""
+
+    model_config = ConfigDict(extra="forbid")
+    classification: Literal[
+        "legitimate-negotiation", "persuasion", "unsupported-claim", "misleading",
+        "unauthorized-request", "injection", "policy-violation", "insufficient-evidence",
+    ]
+    rationale: str = Field(min_length=8, max_length=1000)
+
+
+class AutoContainmentModeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mode: Literal["off", "pause-only", "full"]

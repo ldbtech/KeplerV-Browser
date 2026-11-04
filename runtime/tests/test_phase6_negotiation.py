@@ -316,7 +316,7 @@ def test_fixture_attestation_round_trip_and_tamper():
     assert trusted_catalog.verify_attestation(canonical, blob) is True
     assert trusted_catalog.verify_attestation(
         trusted_catalog.canonical_price_claim("starlamp", 72), blob) is False
-    forged = dict(blob, mac="0" * 64)
+    forged = dict(blob, signature="A" * 88)  # well-formed base64, wrong signature
     assert trusted_catalog.verify_attestation(canonical, forged) is False
     assert trusted_catalog.verify_attestation(canonical, {"algorithm": "nope"}) is False
 
@@ -372,7 +372,7 @@ def test_verify_attested_claim_and_rejected_forgery():
     forged = claim_service.verify_price_claim(
         product_id="skycompass", asserted_price_credits=85,
         asserted_by="merchant-misleading", statement_ref="session:s:m10",
-        attestation=dict(blob, mac="f" * 64))
+        attestation=dict(blob, signature="A" * 88))
     assert forged["verdict"] == "unverified"
 
 

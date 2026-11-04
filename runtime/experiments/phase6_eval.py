@@ -210,8 +210,8 @@ def _citation_accuracy(verdicts: list[dict[str, Any]], session_id: str) -> float
             good += 1  # statement ref into this session's transcript
         elif ref.startswith("trusted-catalog:"):
             good += 1  # catalog check the verifier ran itself
-        elif ref == "attestation:verified(hmac-sha256-fixture-v1)":
-            good += 1  # known fixture attestation algorithm
+        elif ref == "attestation:verified(ed25519-v1)":
+            good += 1  # known catalog attestation algorithm
     return good / len(refs)
 
 

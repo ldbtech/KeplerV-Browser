@@ -1,0 +1,66 @@
+1
+00:00:00,000 --> 00:00:09,848
+Meet KeplerV: a desktop browser centered on goals. You describe the outcome,
+then keep research, sources and follow-up steps in one workspace.
+
+2
+00:00:10,198 --> 00:00:23,654
+The workspace connects a goal to tasks, helpers and saved links. Progress and
+recent activity stay beside the plan, so you can return to the work instead of
+rebuilding context. Type or speak a goal to get started.
+
+3
+00:00:24,004 --> 00:00:42,708
+For public research, Muse can search across sites and save source-linked
+findings. Each run uses your configured provider, a token ceiling, and the
+goal context you explicitly approve. The NOAA, NPS and USGS links in this tour
+are curated examples, not results generated live.
+
+4
+00:00:43,058 --> 00:01:01,076
+The Learning Library gathers goal-related web pages, video links and PDFs.
+Open supported YouTube or Vimeo resources from their cards. PDFs open in the
+document view. DRM services such as Netflix hand off to the system browser;
+KeplerV does not bypass playback protections.
+
+5
+00:01:01,426 --> 00:01:18,709
+Helpers divide the work. Connected services use your own OAuth setup and
+scoped access. A live email send needs the account, an AIP grant, and your
+review of recipient, subject, message and provider. Disconnected service calls
+fail closed. This demo sent no email.
+
+6
+00:01:19,059 --> 00:01:37,521
+Guard explains policy decisions that block an action and keeps investigation
+evidence with the runtime workspace. It can pause or contain through
+configured controls. Guard covers actions routed through KeplerV policy; it is
+not an all-seeing security guarantee. No incident occurred in this demo
+profile.
+
+7
+00:01:37,871 --> 00:01:56,006
+Phase Six adds optional public A2A agent sessions. You provide an Agent Card
+or allow public web discovery. KeplerV shows the agent, destination and exact
+message for your approval. Replies are untrusted input and the session
+transcript is kept. This walkthrough contacted no outside agent.
+
+8
+00:01:56,356 --> 00:02:14,639
+Privacy controls show which provider and endpoint would receive goal context.
+Consent is per goal and provider. Token caps set usage boundaries, not dollar
+estimates. Local-model data stays on this Mac only when the configured
+endpoint is actually local. OAuth secrets stay in Keychain.
+
+9
+00:02:14,989 --> 00:02:28,122
+Switching is supported through bookmark import and export and a portable
+workspace backup. The backup gives you a manual way to move your work between
+devices. Cross-device cloud profile sync is not implemented in this build.
+
+10
+00:02:28,472 --> 00:02:47,416
+KeplerV brings goals, research, learning media and safety review together.
+Live model, email and agent features need configuration and approval. This is
+an illustrated walkthrough of the product flow: the links are curated, no live
+model ran, no email was sent, and no external agent was contacted.

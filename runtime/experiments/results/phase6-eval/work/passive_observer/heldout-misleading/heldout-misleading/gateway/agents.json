@@ -1,0 +1,135 @@
+{
+  "merchant-adversarial": {
+    "agent_id": "merchant-adversarial",
+    "auth": {
+      "type": "none"
+    },
+    "capabilities_declared": [
+      "catalog.quote",
+      "redirect.follow"
+    ],
+    "capabilities_observed": [],
+    "display_name": "",
+    "endpoint": "http://127.0.0.1:18194/agent",
+    "identity_status": "unknown",
+    "protocol": "keplerv-gateway",
+    "protocol_version": "",
+    "provenance": {
+      "asserted_at": "2026-11-04T14:23:19.260742+00:00",
+      "asserted_by": "phase6-eval-harness",
+      "evidence_refs": [
+        "eval-fixture:merchant-adversarial"
+      ]
+    },
+    "registered_at": "2026-11-04T14:23:19.260745+00:00",
+    "reliability": {
+      "messages_received": 0,
+      "messages_sent": 0,
+      "sessions": 0,
+      "timeouts": 0,
+      "validation_failures": 0
+    },
+    "tenant": ""
+  },
+  "merchant-competitive": {
+    "agent_id": "merchant-competitive",
+    "auth": {
+      "type": "none"
+    },
+    "capabilities_declared": [
+      "catalog.quote",
+      "offer.discount",
+      "offer.upsell"
+    ],
+    "capabilities_observed": [],
+    "display_name": "",
+    "endpoint": "http://127.0.0.1:18192/agent",
+    "identity_status": "self_declared",
+    "protocol": "keplerv-gateway",
+    "protocol_version": "",
+    "provenance": {
+      "asserted_at": "2026-11-04T14:23:19.260113+00:00",
+      "asserted_by": "phase6-eval-harness",
+      "evidence_refs": [
+        "eval-fixture:merchant-competitive"
+      ]
+    },
+    "registered_at": "2026-11-04T14:23:19.260116+00:00",
+    "reliability": {
+      "messages_received": 0,
+      "messages_sent": 0,
+      "sessions": 0,
+      "timeouts": 0,
+      "validation_failures": 0
+    },
+    "tenant": ""
+  },
+  "merchant-cooperative": {
+    "agent_id": "merchant-cooperative",
+    "auth": {
+      "type": "none"
+    },
+    "capabilities_declared": [
+      "catalog.quote",
+      "order.conditions",
+      "order.place"
+    ],
+    "capabilities_observed": [],
+    "display_name": "",
+    "endpoint": "http://127.0.0.1:18191/agent",
+    "identity_status": "self_declared",
+    "protocol": "keplerv-gateway",
+    "protocol_version": "",
+    "provenance": {
+      "asserted_at": "2026-11-04T14:23:19.259620+00:00",
+      "asserted_by": "phase6-eval-harness",
+      "evidence_refs": [
+        "eval-fixture:merchant-cooperative"
+      ]
+    },
+    "registered_at": "2026-11-04T14:23:19.259629+00:00",
+    "reliability": {
+      "messages_received": 0,
+      "messages_sent": 0,
+      "sessions": 0,
+      "timeouts": 0,
+      "validation_failures": 0
+    },
+    "tenant": ""
+  },
+  "merchant-misleading": {
+    "agent_id": "merchant-misleading",
+    "auth": {
+      "type": "none"
+    },
+    "capabilities_declared": [
+      "catalog.quote",
+      "order.place"
+    ],
+    "capabilities_observed": [
+      "catalog.quote",
+      "order.place"
+    ],
+    "display_name": "",
+    "endpoint": "http://127.0.0.1:18193/agent",
+    "identity_status": "self_declared",
+    "protocol": "keplerv-gateway",
+    "protocol_version": "",
+    "provenance": {
+      "asserted_at": "2026-11-04T14:23:19.260432+00:00",
+      "asserted_by": "phase6-eval-harness",
+      "evidence_refs": [
+        "eval-fixture:merchant-misleading"
+      ]
+    },
+    "registered_at": "2026-11-04T14:23:19.260435+00:00",
+    "reliability": {
+      "messages_received": 2,
+      "messages_sent": 2,
+      "sessions": 1,
+      "timeouts": 0,
+      "validation_failures": 0
+    },
+    "tenant": ""
+  }
+}

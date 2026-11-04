@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import re
+import shutil
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -113,6 +115,133 @@ class RuntimeStore:
                     (f"evt-{uuid4()}", row["id"], row["agent_id"], row["goal_id"], "agent.recovered", "paused", None,
                      json.dumps({"summary": "KeplerV restarted; the agent is paused and can be resumed."}), utc_now()),
                 )
+
+    def clear_all_data(self) -> None:
+        """Remove the local runtime database, then recreate an empty schema.
+
+        This intentionally resets append-only Guard evidence by destroying the
+        complete user-selected runtime store, rather than deleting individual
+        audit rows behind the hash-chain triggers. Saved screenshots go with it.
+        """
+        with self._lock:
+            for suffix in ("", "-wal", "-shm"):
+                Path(f"{self.db_path}{suffix}").unlink(missing_ok=True)
+            shutil.rmtree(self.db_path.parent / "screenshots", ignore_errors=True)
+            self._initialize()
+
+    def delete_goal_data(self, goal_id: str) -> dict[str, int]:
+        """Delete every local record for one goal; returns per-table counts.
+
+        Guard evidence and transitions are append-only, so instead of deleting
+        rows behind the hash-chain triggers the store is rebuilt: surviving
+        rows are copied into a fresh database which then replaces the live
+        file. Screenshot files for the goal's runs are removed from disk too.
+        Raises KeyError when the goal has no local runtime records, and
+        ValueError if an unrecognized table appears (fail closed: classify the
+        table's goal linkage before deleting anything).
+        """
+        with self._lock:
+            with self._connect() as db:
+                run_ids = [row[0] for row in db.execute(
+                    "SELECT id FROM runs WHERE goal_id = ?", (goal_id,))]
+                case_ids = [row[0] for row in db.execute(
+                    "SELECT id FROM guard_cases WHERE goal_id = ?", (goal_id,))]
+                evidence_count = db.execute(
+                    "SELECT COUNT(*) FROM evidence WHERE goal_id = ?", (goal_id,)).fetchone()[0]
+            if not run_ids and not case_ids and not evidence_count:
+                raise KeyError("Goal not found in local runtime history.")
+            counts = self._rebuild_excluding_goal(goal_id)
+            counts["screenshots"] = self._delete_run_screenshots(run_ids)
+            return counts
+
+    def _rebuild_excluding_goal(self, goal_id: str) -> dict[str, int]:
+        from runtime.gateway.sessions import GatewaySessionStore
+        filters = {
+            "runs": "goal_id != :goal",
+            "events": "goal_id != :goal",
+            "evidence": "goal_id != :goal",
+            "guard_cases": "goal_id != :goal",
+            "guard_evidence": "case_id NOT IN (SELECT id FROM src.guard_cases WHERE goal_id = :goal)",
+            "guard_transitions": "case_id NOT IN (SELECT id FROM src.guard_cases WHERE goal_id = :goal)",
+            "guard_case_permissions": "case_id NOT IN (SELECT id FROM src.guard_cases WHERE goal_id = :goal)",
+            "gateway_sessions": "run_id NOT IN (SELECT id FROM src.runs WHERE goal_id = :goal)",
+            "gateway_messages": (
+                "session_id NOT IN (SELECT id FROM src.gateway_sessions WHERE "
+                "run_id NOT IN (SELECT id FROM src.runs WHERE goal_id = :goal))"
+            ),
+        }
+        with self._connect() as db:
+            tables = [row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")]
+        unknown = [name for name in tables if name not in filters]
+        if unknown:
+            raise ValueError(
+                "Cannot delete goal data: unrecognized tables have unknown goal linkage: "
+                + ", ".join(sorted(unknown)))
+        tmp_path = self.db_path.parent / f".{self.db_path.name}.delete-tmp"
+        for suffix in ("", "-wal", "-shm"):
+            Path(f"{tmp_path}{suffix}").unlink(missing_ok=True)
+        RuntimeStore(tmp_path)
+        GatewaySessionStore(tmp_path)
+        counts: dict[str, int] = {}
+        connection = sqlite3.connect(tmp_path, timeout=30)
+        try:
+            connection.execute("ATTACH DATABASE ? AS src", (str(self.db_path),))
+            for table in tables:
+                columns = [row[1] for row in connection.execute(
+                    f"PRAGMA src.table_info({table})").fetchall()]
+                quoted = ", ".join(f'"{name}"' for name in columns)
+                kept = connection.execute(
+                    f'INSERT INTO main."{table}" ({quoted}) '
+                    f'SELECT {quoted} FROM src."{table}" WHERE {filters[table]}',
+                    {"goal": goal_id}).rowcount
+                total = connection.execute(f'SELECT COUNT(*) FROM src."{table}"').fetchone()[0]
+                counts[table] = total - kept
+            connection.commit()
+            connection.execute("DETACH DATABASE src")
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        os.replace(tmp_path, self.db_path)
+        for suffix in ("-wal", "-shm"):
+            Path(f"{self.db_path}{suffix}").unlink(missing_ok=True)
+            Path(f"{tmp_path}{suffix}").unlink(missing_ok=True)
+        return counts
+
+    def _delete_run_screenshots(self, run_ids: list[str]) -> int:
+        folder = self.db_path.parent / "screenshots"
+        deleted = 0
+        for run_id in run_ids:
+            path = folder / f"{re.sub(r'[^a-zA-Z0-9_-]', '_', run_id)}.png"
+            try:
+                path.unlink()
+                deleted += 1
+            except FileNotFoundError:
+                pass
+        return deleted
+
+    def clear_screenshots(self) -> int:
+        """Remove every saved agent-browser screenshot; returns files deleted."""
+        folder = self.db_path.parent / "screenshots"
+        if not folder.is_dir():
+            return 0
+        deleted = 0
+        for path in folder.glob("*.png"):
+            try:
+                path.unlink()
+                deleted += 1
+            except OSError:
+                pass
+        return deleted
+
+    def reset_browser_caches(self) -> int:
+        """Clear cached per-run browser state (URLs, counters); evidence untouched."""
+        with self._lock, self._connect() as db:
+            cursor = db.execute(
+                "UPDATE runs SET current_url = NULL, browser_visited = 0, text_extracted = 0")
+            return cursor.rowcount
 
     def create_run(self, values: dict[str, Any], provider: str, model: str, tools: list[str], permissions: list[str], parent_agent_id: str | None = None) -> dict[str, Any]:
         run_id, agent_id = f"run-{uuid4()}", f"agent-{uuid4()}"

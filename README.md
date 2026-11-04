@@ -72,9 +72,9 @@ The notarization command submits the built DMG to Apple and waits for its result
 ## Research flow
 
 1. Create/select a goal in the existing Intent Space and open its details.
-2. Set the maximum token budget for the run (1,000–50,000) or leave the saved preference.
-3. Start Muse research from the goal. A starting URL is optional; KeplerV searches the public web for up to three results.
-4. Muse may inspect up to two public HTTPS result pages and extract up to 3,500 characters per page in an isolated headless Chromium context. Page clicks and form fills require per-action approval.
+2. Set a run-wide token ceiling of at least 1,000 tokens, or choose Unlimited. Numeric ceilings have no product-set 50,000-token maximum.
+3. Start Muse research from the goal. A starting URL is optional; KeplerV returns up to ten public-web results per search query.
+4. Muse can inspect as many relevant public HTTPS pages as needed. There is no fixed page-count cap; each run is bounded by its 24 model-step budget and, unless Unlimited is selected, its optional token ceiling. Provider context windows, per-response limits, and provider charges still apply. Each extraction can include up to 12,000 characters in an isolated headless Chromium context. Page clicks and form fills require per-action approval.
 5. KeplerV records runtime events and source-quoted findings in local SQLite, associates them with the goal, and updates the existing graph/activity surfaces.
 6. Pause, resume, stop, review approvals, and inspect findings from the goal/agent panels.
 
@@ -101,26 +101,29 @@ npm run build
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-Phase 5 gates (no live-model evals; `test_demo.py` needs loopback sockets and is
-deselected inside sandboxes — see `docs/phase5-capabilities.md`):
+Full gates (no live-model evals; loopback-bind tests need real sockets, so
+run outside the macOS sandbox — see `docs/phase5-capabilities.md`):
 
 ```sh
-.venv/bin/python -m pytest runtime/tests -q --deselect runtime/tests/test_demo.py
-.venv/bin/python -m pytest runtime/tests/test_phase5_scenarios.py -q
-npx vitest run src/experience/scenarioA.localVideo.test.ts
-cargo test --manifest-path src-tauri/Cargo.toml
-npm run build
+.venv/bin/python -m pytest runtime/tests -q   # 319 passed, 8 skipped
+npm test                                      # vitest: 95 passed
+cargo test --manifest-path src-tauri/Cargo.toml   # 23 passed
+npm run build                  # svelte-check (0 errors, 0 warnings) + vite build
 ```
 
-Phase 6 gates (no live-model evals; `test_demo.py` needs loopback sockets and is
-deselected inside sandboxes — see `docs/phase6-federation.md`):
+Phase 5 focused gates:
 
 ```sh
-.venv/bin/python -m pytest runtime/tests -q --deselect runtime/tests/test_demo.py
+.venv/bin/python -m pytest runtime/tests/test_phase5_scenarios.py runtime/tests/test_mock_oauth_idp.py runtime/tests/test_mail_token_bridge.py runtime/tests/test_gmail_send.py runtime/tests/test_outlook_connector.py -q
+npx vitest run src/experience/scenarioA.localVideo.test.ts
+```
+
+Phase 6 focused gates:
+
+```sh
 .venv/bin/python -m pytest runtime/tests/test_phase6_demo_e2e.py -q
 .venv/bin/python -m runtime.experiments.phase6_eval runtime/experiments/results/phase6-eval
-npm test
-npm run build
+.venv/bin/python -m pytest runtime/tests/test_federation_ed25519.py runtime/tests/test_guard_auto_containment.py runtime/tests/test_guard_model_classifier.py -q
 ```
 
 The deterministic Python workflow exercises orchestration, AIP denial, event persistence, and source-checked evidence. A separate browser integration test below uses real Playwright Chromium. A live Meta API call requires internet access and `MODEL_API_KEY`.
@@ -170,7 +173,7 @@ Open any goal, paste `http://127.0.0.1:<port>/demo/university/catalog` into the 
 | Guard Observer | Deterministic AIP denial rules open and group cases per run; one contextual Muse Spark screen is triggered per case, with qualitative uncalibrated risk and evidence-cited output; cases missed by a restart are re-screened on launch |
 | Guard investigation | User-started Muse Wonder report plus adaptive, one-question-at-a-time interviews; Wonder chooses evidence-cited questions, the original agent model answers in an isolated no-tools context, each statement is retained as unverified evidence, and the five-question cap persists with the case; verified live against Meta models |
 | Guard Adjudicator | Independent Muse Wonder review excludes the Detective report, validates citations, distinguishes denials from completed actions, and records contradictions and uncertainty for human review; it cannot change AIP policy; verified live against Meta models |
-| Guard containment | Human-confirmed pause/resume, deny-pending, capability revocation, browser isolation/restore, and review requests are routed through the trusted runtime, recorded in the hash-chained case history, and leave AIP policy unchanged; automatic emergency rules remain unimplemented |
+| Guard containment | Human-confirmed pause/resume, deny-pending, capability revocation, browser isolation/restore, and review requests are routed through the trusted runtime, recorded in the hash-chained case history, and leave AIP policy unchanged; policy-gated auto-containment (off/pause-only/full, `GET/POST /guard/auto-containment`, Safety-panel notices with Undo) triggers automatically on high-risk flagged external replies after `gateway.send`, while routine denials never auto-trigger |
 | Guard scenarios and evaluation | Five isolated adversarial scenarios (prompt injection, benign anomaly, delegation abuse, contradictory statements, search poisoning) plus a three-config evaluation harness with a no-interview ablation; see `runtime/experiments/results/` for measured live-model outputs |
 | Provider connections | Cloud credentials are saved in macOS Keychain; provider settings and local model endpoints stay on-device; ChatGPT account tokens are refreshed and used only when plan usage was authorized |
 | Offline workspace | Explicitly selectable from the goal panel when no model is connected; goals, tasks, and local helpers stay available while research stays gated and nothing is presented as live |
@@ -186,15 +189,15 @@ Open any goal, paste `http://127.0.0.1:<port>/demo/university/catalog` into the 
 | YouTube / Vimeo | Official provider embeds created from source URLs found by the agent; users never paste IDs; blocked videos can be opened at their source |
 | Direct video files and PDFs | HTTPS `.mp4`, `.webm`, `.mov`, and `.pdf` links open in the in-app viewer when the host permits it; files can be downloaded from their source |
 | Netflix | Opens in the system browser; embedded playback is unsupported (DRM) and no workaround is attempted |
-| Service accounts (OAuth) | Real PKCE flow (S256, state/nonce, loopback callback, refresh, revoke) with keychain token storage under `oauth:{provider}:{account}`; public client IDs only via `KEPLERV_OAUTH_CLIENT_ID_*` or `oauth-client-ids.json`; no IDs ship so live sign-in is unexercised; Python holds metadata only, never tokens |
-| Email read | Fake-mail fixture (3 fictional messages, every payload FAKE-labeled) served over token-authed `/mail/*` routes; Gmail client is real but fails closed as not-connected (keychain tokens not bridged to Python); Outlook is a labeled skeleton; ambiguous references return candidates, never auto-pick |
-| Email send | Fake-mail outbox only, after AIP grant plus explicit approval; voice can only request approval; real-provider send fails loudly with "Nothing was sent" — no live send path by design |
+| Service accounts (OAuth) | Real PKCE flow (S256, state/nonce, loopback callback, refresh, revoke) with keychain token storage under `oauth:{provider}:{account}`; public client IDs pasteable in the Connected services card or via `KEPLERV_OAUTH_CLIENT_ID_*`; Rust bridges per-request access tokens to the sidecar over the authed 127.0.0.1 channel (never JS/disk/logs); full flow proven against a loopback mock IdP; no IDs ship so live sign-in needs the user's own IDs (`docs/mail-setup.md`) |
+| Email read | Fake-mail fixture (3 fictional messages, every payload FAKE-labeled) served over token-authed `/mail/*` routes; real Gmail + Outlook (MS-Graph) clients read LIVE-labeled mail through the token bridge; disconnected reads fail closed as not-connected; ambiguous references return candidates, never auto-pick |
+| Email send | Live-provider send after AIP grant plus explicit approval (goal-panel detail + LIVE-labeled receipt); fake-mail outbox for fixtures; denied/unscoped/disconnected sends transmit nothing; voice can only request approval, never send |
 | Service permissions | 18 service tools (13 Phase 5 + 5 gateway) gated on exact per-agent/per-goal grants with immediate revoke, approval for sensitive ops, `service.access_denied` events, and high-severity Guard cases; unauthorized sends are denied with an empty outbox (Scenario C) |
 | Trust Gateway | Real exclusive cross-boundary path: SSRF-checked endpoints, strict envelopes, correlation, budgets, rate limits, sqlite transcripts; loopback fixtures only via explicit allowlist |
 | Synthetic merchants | Fake labeled fixtures (cooperative/competitive/misleading/adversarial) over the fictional KeplerV Bazaar; fictional credits, no real purchases |
 | Negotiation + verification | Real multi-round gateway flows with frozen goals, threat redaction, credential refusal, and 4-level claim verdicts against a SHA-256-manifested trusted catalog; local policy is a deterministic fake |
-| Federated AIP | Experimental symmetric-HMAC signed-statement prototype (established primitives, no custom crypto); production needs asymmetric keys in a KMS |
-| Guard exchange investigation | Deterministic `fake-rules-v1` classification (8 classes) + pure investigation with catalog/ledger contradiction detection and gateway-bound follow-ups; contradictions open Guard cases |
+| Federated AIP | Real Ed25519 signed statements (`cryptography==50.0.2`, no custom crypto) with keystore, rotation, and revocation; tampered/unknown/revoked keys verify false; production seeds belong in the keychain `federation-identity:{operator}:{key}` namespace (test-only file fallback); session panel shows Verified-ed25519 vs unsigned |
+| Guard exchange investigation | Deterministic `fake-rules-v1` baseline + model-powered classifier (8 classes; `fake-model-v1` fake adapters, `live-muse-v1` live path env-gated on `MODEL_API_KEY` + `KEPLERV_GUARD_MODEL_CLASSIFIER=1`) + pure investigation with catalog/ledger contradiction detection and gateway-bound follow-ups; contradictions open Guard cases |
 | Phase 6 eval | Real three-arm harness (AIP-only vs passive vs active) over dev + held-out fictional scenarios; fake adapters by default, live loopback explicitly opt-in and still fictional |
 | Gateway inspection | Real voice intents + tier-badged session graph rendering fixture records; close stays human-confirmed, never voice-triggered |
 
@@ -212,7 +215,9 @@ The native resource-window feature remains separate from the agent research brow
 - `runtime/` — FastAPI sidecar, Meta adapter, agent scheduler, AIP, Playwright browser gateway, SQLite store, and tests.
 - `runtime/gateway/`, `runtime/merchants/`, `runtime/negotiation/`, `runtime/verification/`, `runtime/federation/` — Trust Gateway, synthetic merchants, negotiation driver, claim verification, and federated-statement prototype.
 - `runtime/services/` — service registry, account metadata store, and labeled fake fixtures.
-- `runtime/connectors/` — Gmail client, Outlook skeleton, fake-mail adapter, shared account resolver.
+- `runtime/connectors/` — Gmail client, Outlook MS-Graph client, fake-mail adapter, shared account resolver.
+- `runtime/guard/model_classification.py`, `runtime/guard/auto_containment.py` — model Guard classifier + policy-gated auto-containment.
+- `runtime/federation/keys.py` — Ed25519 keygen/sign/verify, keystore, rotation.
 - `src-tauri/src/oauth.rs` — OAuth PKCE flow, keychain token storage, connect/refresh/disconnect commands.
 - `src-tauri/src/runtime_bridge.rs` — managed sidecar process, random token, authenticated native requests, and typed event polling.
 - `src-tauri/src/lib.rs` — Tauri command registration and sidecar lifecycle.

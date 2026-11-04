@@ -131,6 +131,17 @@ class BrowserController:
         if not self.page:
             raise BrowserToolError("Navigate to the user-authorized page before using this browser tool.")
 
+    async def clear_site_data(self) -> bool:
+        """Clear cookies from the live ephemeral context; False when none is open.
+
+        The context stays open so the run keeps working; only stored site
+        data is forgotten.
+        """
+        if not self.context:
+            return False
+        await self.context.clear_cookies()
+        return True
+
     async def close(self) -> None:
         if self.context:
             await self.context.close()

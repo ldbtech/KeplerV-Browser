@@ -45,8 +45,8 @@ STARLAMP = "starlamp"
 STARLAMP_PRICE = 120  # catalog_fixture price; asserted, not assumed
 assert catalog_fixture.get_product(STARLAMP)["price_credits"] == STARLAMP_PRICE
 
-FIXTURE_KEY_A = b"phase6-m7-fixture-operator-key-A-test-only"
-FIXTURE_KEY_B = b"phase6-m7-fixture-operator-key-B-test-only"
+FIXTURE_SEED_A = bytes(range(32))  # deterministic Ed25519 test seed
+FIXTURE_SEED_B = bytes((i + 1) % 256 for i in range(32))  # deterministic Ed25519 test seed
 
 
 def _msg(message_id: str, payload: dict[str, Any], *,
@@ -99,7 +99,7 @@ def _harness(tmp_path):
 
 def test_statement_sign_verify_roundtrip_operator():
     registry = OperatorRegistry()
-    registry.register("op-a", key=FIXTURE_KEY_A)
+    registry.register("op-a", seed=FIXTURE_SEED_A)
     envelope = sign_statement(
         operator_id="op-a",
         statement={"kind": "quote", "scopes_requested": ["catalog.quote"],
@@ -113,7 +113,7 @@ def test_statement_sign_verify_roundtrip_operator():
 
 def test_statement_tampered_payload_rejected():
     registry = OperatorRegistry()
-    registry.register("op-a", key=FIXTURE_KEY_A)
+    registry.register("op-a", seed=FIXTURE_SEED_A)
     envelope = sign_statement(
         operator_id="op-a", statement={"kind": "quote", "content": {"price": 120}},
         registry=registry)
@@ -125,7 +125,7 @@ def test_statement_tampered_payload_rejected():
 
 def test_statement_unknown_operator_rejected():
     registry_a, registry_b = OperatorRegistry(), OperatorRegistry()
-    registry_a.register("op-a", key=FIXTURE_KEY_A)
+    registry_a.register("op-a", seed=FIXTURE_SEED_A)
     envelope = sign_statement(
         operator_id="op-a", statement={"kind": "quote"}, registry=registry_a)
     result = verify_statement(envelope, registry_b, RevocationList())
@@ -136,7 +136,7 @@ def test_statement_unknown_operator_rejected():
 
 def test_revoked_key_rejected_and_status_reported():
     registry = OperatorRegistry()
-    receipt = registry.register("op-a", key=FIXTURE_KEY_A)
+    receipt = registry.register("op-a", seed=FIXTURE_SEED_A)
     revocation = RevocationList()
     revocation.revoke_key(receipt["key_id"], "test rotation")
     envelope = sign_statement(
@@ -151,7 +151,7 @@ def test_revoked_key_rejected_and_status_reported():
 
 def test_delegation_credential_proof_level():
     registry = OperatorRegistry()
-    registry.register("op-a", key=FIXTURE_KEY_A)
+    registry.register("op-a", seed=FIXTURE_SEED_A)
     envelope = sign_statement(
         operator_id="op-a",
         statement={"kind": "quote", "scopes_requested": ["catalog.quote"]},
@@ -166,7 +166,7 @@ def test_delegation_credential_proof_level():
 
 def test_delegation_scope_exceeded_stays_operator():
     registry = OperatorRegistry()
-    registry.register("op-a", key=FIXTURE_KEY_A)
+    registry.register("op-a", seed=FIXTURE_SEED_A)
     envelope = sign_statement(
         operator_id="op-a",
         statement={"kind": "payment", "scopes_requested": ["payment.execute"]},
@@ -182,7 +182,7 @@ def test_delegation_scope_exceeded_stays_operator():
 
 def test_revoked_credential_breaks_delegation():
     registry = OperatorRegistry()
-    registry.register("op-a", key=FIXTURE_KEY_A)
+    registry.register("op-a", seed=FIXTURE_SEED_A)
     credential = issue_delegation(
         operator_id="op-a", delegate_id="merchant-x",
         scopes=["catalog.quote"], registry=registry)
@@ -200,8 +200,8 @@ def test_revoked_credential_breaks_delegation():
 
 def test_receipt_proof_level_and_forgery():
     registry = OperatorRegistry()
-    registry.register("op-a", key=FIXTURE_KEY_A)
-    registry.register("op-b", key=FIXTURE_KEY_B)
+    registry.register("op-a", seed=FIXTURE_SEED_A)
+    registry.register("op-b", seed=FIXTURE_SEED_B)
     envelope = sign_statement(
         operator_id="op-a",
         statement={"kind": "quote", "scopes_requested": ["catalog.quote"]},
@@ -224,7 +224,7 @@ def test_signed_not_true_valid_origin_false_content():
     """A valid signature over catalog-false content verifies origin only;
     the claim service still marks the content unverified."""
     registry = OperatorRegistry()
-    registry.register("op-a", key=FIXTURE_KEY_A)
+    registry.register("op-a", seed=FIXTURE_SEED_A)
     envelope = sign_statement(
         operator_id="op-a",
         statement={"kind": "quote", "content": {"product_id": STARLAMP,

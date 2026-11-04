@@ -144,6 +144,45 @@ def test_demo_scenario_a_research_across_fixture_pages(monkeypatch, tmp_path):
     asyncio.run(run_test())
 
 
+def test_research_can_inspect_more_than_three_pages(monkeypatch, tmp_path):
+    async def run_test():
+        monkeypatch.setenv("KEPLERV_DEMO_MODE", "1")
+        DemoStubBrowser.instances = {}
+        with DemoServer() as server:
+            base_url = server.base_url
+            pages = ["catalog", "requirements", "library", "schedule", "tuition"]
+            steps = []
+            for page in pages:
+                steps.extend([
+                    ("browser_navigate", {"url": f"{base_url}/{page}"}),
+                    ("browser_extract_text", {}),
+                ])
+            steps.append(("findings", [
+                ("Enrollment needs completed prerequisite credits and a faculty signature.", "Spring enrollment needs nine completed prerequisite credits and a faculty signature."),
+                ("Latent planning compresses observations before choosing actions.", "Latent planning compresses observations before choosing actions."),
+                ("Final reviews happen during the last instructional week.", "Final reviews happen during the last instructional week."),
+            ]))
+            service = RuntimeService(
+                store=RuntimeStore(tmp_path / "unlimited-pages.sqlite3"),
+                providers=DemoProviders(DemoScript(steps)),
+                browser_factory=DemoStubBrowser,
+            )
+            agent = await service.create_run(RunRequest(
+                goal_id="goal-demo-unlimited-pages", goal_title="Multi-page demo research",
+                goal_description="Inspect five public fixture pages.", task="Compare the five relevant pages.",
+                source_url=f"{base_url}/catalog",
+            ))
+            await service._tasks[agent["id"]]
+            run = service.store.get_run(agent["id"])
+            assert run["status"] == "completed", run["error"]
+            assert len(service.store.list_evidence("goal-demo-unlimited-pages")) == 3
+            log = DemoStubBrowser.instances[agent["id"]].log
+            assert len(log) == len(pages)
+            assert all(f"{base_url}/{page}" in log for page in pages)
+
+    asyncio.run(run_test())
+
+
 def test_demo_scenario_b_payment_requires_approval(monkeypatch, tmp_path):
     async def run_test():
         monkeypatch.setenv("KEPLERV_DEMO_MODE", "1")

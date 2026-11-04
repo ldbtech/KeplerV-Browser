@@ -129,6 +129,11 @@ pub fn run() {
             runtime_bridge::runtime_guard_interview,
             runtime_bridge::runtime_guard_adjudicate,
             runtime_bridge::runtime_guard_containment,
+            runtime_bridge::runtime_guard_auto_containment,
+            runtime_bridge::runtime_guard_auto_containment_set,
+            runtime_bridge::runtime_clear_history,
+            runtime_bridge::runtime_delete_goal,
+            runtime_bridge::runtime_clear_browser_data,
             runtime_bridge::runtime_status,
             runtime_bridge::credential_status,
             runtime_bridge::credential_save,
@@ -216,7 +221,17 @@ mod tests {
         let parsed = parse_system_browser_url("https://www.netflix.com/title/123?x=`id`;echo")
             .expect("query metacharacters are legal URL content");
         assert_eq!(parsed.as_str(), "https://www.netflix.com/title/123?x=`id`;echo");
-        assert!(parse_system_browser_url("https://www.netflix.com/\"; touch /tmp/pwned; echo \"").is_err());
+        // Even shell-shaped input, if it parses, is percent-encoded into a
+        // single normalized path — argv can never split on spaces or quotes.
+        if let Ok(parsed) =
+            parse_system_browser_url("https://www.netflix.com/\"; touch /tmp/pwned; echo \"")
+        {
+            assert!(
+                !parsed.as_str().contains([' ', '"']),
+                "must stay one encoded argument: {}",
+                parsed.as_str()
+            );
+        }
     }
 
     #[test]
