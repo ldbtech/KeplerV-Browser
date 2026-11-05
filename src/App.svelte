@@ -614,7 +614,7 @@
   }
   async function startMuseResearch() {
     if (!activeGoal || !runtimeModelConfigured || startingRuntimeRun) return;
-    if (activeGoal.providerContextConsent !== `${activeProvider}:${activeModel}`) {
+    if (activeGoal.providerContextConsent !== activeProviderConsentKey) {
       runtimeError = "Review the data-sharing notice and consent for this provider before starting research.";
       return;
     }
